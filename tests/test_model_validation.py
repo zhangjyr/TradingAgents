@@ -1,5 +1,63 @@
+import sys
+import types
 import unittest
 import warnings
+
+langchain_openai = types.ModuleType("langchain_openai")
+langchain_anthropic = types.ModuleType("langchain_anthropic")
+langchain_google_genai = types.ModuleType("langchain_google_genai")
+langchain_core_messages = types.ModuleType("langchain_core.messages")
+
+
+class ChatOpenAI:
+    pass
+
+
+class ChatAnthropic:
+    pass
+
+
+class ChatGoogleGenerativeAI:
+    pass
+
+
+class BaseMessage:
+    def __init__(self, content=""):
+        self.content = content
+
+
+class HumanMessage(BaseMessage):
+    type = "human"
+
+
+class SystemMessage(BaseMessage):
+    type = "system"
+
+
+class AIMessage(BaseMessage):
+    type = "ai"
+
+
+class ToolMessage(BaseMessage):
+    type = "tool"
+
+    def __init__(self, content="", tool_call_id="tool"):
+        super().__init__(content=content)
+        self.tool_call_id = tool_call_id
+
+
+langchain_openai.ChatOpenAI = ChatOpenAI
+langchain_anthropic.ChatAnthropic = ChatAnthropic
+langchain_google_genai.ChatGoogleGenerativeAI = ChatGoogleGenerativeAI
+langchain_core_messages.BaseMessage = BaseMessage
+langchain_core_messages.HumanMessage = HumanMessage
+langchain_core_messages.SystemMessage = SystemMessage
+langchain_core_messages.AIMessage = AIMessage
+langchain_core_messages.ToolMessage = ToolMessage
+sys.modules.setdefault("langchain_openai", langchain_openai)
+sys.modules.setdefault("langchain_anthropic", langchain_anthropic)
+sys.modules.setdefault("langchain_google_genai", langchain_google_genai)
+sys.modules.setdefault("langchain_core.messages", langchain_core_messages)
 
 from tradingagents.llm_clients.base_client import BaseLLMClient
 from tradingagents.llm_clients.model_catalog import get_known_models

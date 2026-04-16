@@ -23,6 +23,34 @@ MODEL_OPTIONS: ProviderModeOptions = {
             ("GPT-5.4 Pro - Most capable, expensive ($30/$180 per 1M tokens)", "gpt-5.4-pro"),
         ],
     },
+    "codex": {
+        "quick": [
+            ("GPT-5.4 Mini - Fast, responsive coding", "gpt-5.4-mini"),
+            ("GPT-5.3 Codex Spark - Near-instant (research preview)", "gpt-5.3-codex-spark"),
+        ],
+        "deep": [
+            ("GPT-5.4 - Flagship frontier, coding + reasoning", "gpt-5.4"),
+            ("GPT-5.3 Codex - Advanced coding", "gpt-5.3-codex"),
+            ("GPT-5.2 Codex - Legacy, succeeded by 5.3 Codex", "gpt-5.2-codex"),
+            ("GPT-5.1 Codex Max - Long-horizon agentic coding", "gpt-5.1-codex-max"),
+            ("GPT-5.1 Codex - Agentic coding", "gpt-5.1-codex"),
+            ("GPT-5 Codex - Tuned for agentic coding", "gpt-5-codex"),
+        ],
+    },
+    "openai_codex_oauth": {
+        "quick": [
+            ("GPT-5.4 Mini - Fast, responsive coding", "gpt-5.4-mini"),
+            ("GPT-5.3 Codex Spark - Near-instant (research preview)", "gpt-5.3-codex-spark"),
+        ],
+        "deep": [
+            ("GPT-5.4 - Flagship frontier, coding + reasoning", "gpt-5.4"),
+            ("GPT-5.3 Codex - Advanced coding", "gpt-5.3-codex"),
+            ("GPT-5.2 Codex - Legacy, succeeded by 5.3 Codex", "gpt-5.2-codex"),
+            ("GPT-5.1 Codex Max - Long-horizon agentic coding", "gpt-5.1-codex-max"),
+            ("GPT-5.1 Codex - Agentic coding", "gpt-5.1-codex"),
+            ("GPT-5 Codex - Tuned for agentic coding", "gpt-5-codex"),
+        ],
+    },
     "anthropic": {
         "quick": [
             ("Claude Sonnet 4.6 - Best speed and intelligence balance", "claude-sonnet-4-6"),

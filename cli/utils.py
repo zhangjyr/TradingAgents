@@ -1,9 +1,10 @@
 import questionary
-from typing import List, Optional, Tuple, Dict
+from typing import List, Tuple
 
 from rich.console import Console
 
 from cli.models import AnalystType
+from tradingagents.llm_clients.codex_client import list_codex_models
 from tradingagents.llm_clients.model_catalog import get_model_options
 
 console = Console()
@@ -136,12 +137,13 @@ def select_research_depth() -> int:
 
 def select_shallow_thinking_agent(provider) -> str:
     """Select shallow thinking llm engine using an interactive selection."""
+    choices = _resolve_model_options(provider, "quick")
 
     choice = questionary.select(
         "Select Your [Quick-Thinking LLM Engine]:",
         choices=[
             questionary.Choice(display, value=value)
-            for display, value in get_model_options(provider, "quick")
+            for display, value in choices
         ],
         instruction="\n- Use arrow keys to navigate\n- Press Enter to select",
         style=questionary.Style(
@@ -164,12 +166,13 @@ def select_shallow_thinking_agent(provider) -> str:
 
 def select_deep_thinking_agent(provider) -> str:
     """Select deep thinking llm engine using an interactive selection."""
+    choices = _resolve_model_options(provider, "deep")
 
     choice = questionary.select(
         "Select Your [Deep-Thinking LLM Engine]:",
         choices=[
             questionary.Choice(display, value=value)
-            for display, value in get_model_options(provider, "deep")
+            for display, value in choices
         ],
         instruction="\n- Use arrow keys to navigate\n- Press Enter to select",
         style=questionary.Style(
@@ -192,6 +195,7 @@ def select_llm_provider() -> tuple[str, str]:
     # Define OpenAI api options with their corresponding endpoints
     BASE_URLS = [
         ("OpenAI", "https://api.openai.com/v1"),
+        ("Codex", ""),
         ("Google", "https://generativelanguage.googleapis.com/v1"),
         ("Anthropic", "https://api.anthropic.com/"),
         ("xAI", "https://api.x.ai/v1"),
@@ -223,6 +227,17 @@ def select_llm_provider() -> tuple[str, str]:
     print(f"You selected: {display_name}\tURL: {url}")
 
     return display_name, url
+
+
+def _resolve_model_options(provider: str, mode: str) -> List[Tuple[str, str]]:
+    if provider.lower() in ("codex", "openai_codex_oauth"):
+        try:
+            models = list_codex_models()
+            if models:
+                return [(model, model) for model in models]
+        except Exception:
+            pass
+    return get_model_options(provider, mode)
 
 
 def ask_openai_reasoning_effort() -> str:

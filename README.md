@@ -133,6 +133,15 @@ export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
 
 For local models, configure Ollama with `llm_provider: "ollama"` in your config.
 
+For Codex, TradingAgents uses the official Codex app-server flow and reuses the credential created by the Codex CLI:
+
+```bash
+npm i -g @openai/codex
+codex login
+```
+
+This stores your Codex credential at `~/.codex/auth.json`. When you choose `codex` in TradingAgents, it will launch `codex app-server --listen stdio://` and reuse that login. If you use a custom Codex home, set `CODEX_HOME` so TradingAgents can find `auth.json`.
+
 Alternatively, copy `.env.example` to `.env` and fill in your keys:
 ```bash
 cp .env.example .env
@@ -146,6 +155,8 @@ tradingagents          # installed command
 python -m cli.main     # alternative: run directly from source
 ```
 You will see a screen where you can select your desired tickers, analysis date, LLM provider, research depth, and more.
+
+If you select `codex`, make sure you have already completed `codex login`. TradingAgents validates that a Codex credential is available before starting the run.
 
 <p align="center">
   <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
@@ -165,7 +176,7 @@ An interface will appear showing results as they load, letting you track the age
 
 ### Implementation Details
 
-We built TradingAgents with LangGraph to ensure flexibility and modularity. The framework supports multiple LLM providers: OpenAI, Google, Anthropic, xAI, OpenRouter, and Ollama.
+We built TradingAgents with LangGraph to ensure flexibility and modularity. The framework supports multiple LLM providers: OpenAI, Codex, Google, Anthropic, xAI, OpenRouter, and Ollama.
 
 ### Python Usage
 
@@ -189,7 +200,7 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
 
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "openai"        # openai, google, anthropic, xai, openrouter, ollama
+config["llm_provider"] = "openai"        # openai, codex, google, anthropic, xai, openrouter, ollama
 config["deep_think_llm"] = "gpt-5.4"     # Model for complex reasoning
 config["quick_think_llm"] = "gpt-5.4-mini" # Model for quick tasks
 config["max_debate_rounds"] = 2

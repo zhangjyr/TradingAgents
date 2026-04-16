@@ -1,6 +1,7 @@
 from typing import Optional
 
 from .base_client import BaseLLMClient
+from .codex_client import CodexClient
 from .openai_client import OpenAIClient
 from .anthropic_client import AnthropicClient
 from .google_client import GoogleClient
@@ -15,7 +16,7 @@ def create_llm_client(
     """Create an LLM client for the specified provider.
 
     Args:
-        provider: LLM provider (openai, anthropic, google, xai, ollama, openrouter)
+        provider: LLM provider (openai, codex, anthropic, google, xai, ollama, openrouter)
         model: Model name/identifier
         base_url: Optional base URL for API endpoint
         **kwargs: Additional provider-specific arguments
@@ -39,6 +40,9 @@ def create_llm_client(
 
     if provider_lower == "xai":
         return OpenAIClient(model, base_url, provider="xai", **kwargs)
+
+    if provider_lower in ("codex", "openai_codex_oauth"):
+        return CodexClient(model, base_url, provider=provider_lower, **kwargs)
 
     if provider_lower == "anthropic":
         return AnthropicClient(model, base_url, **kwargs)

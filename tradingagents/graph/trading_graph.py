@@ -135,7 +135,7 @@ class TradingAgentsGraph:
 
     def _get_provider_kwargs(self) -> Dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
-        kwargs = {}
+        kwargs = {"cwd": self.config.get("project_dir")}
         provider = self.config.get("llm_provider", "").lower()
 
         if provider == "google":
@@ -143,7 +143,7 @@ class TradingAgentsGraph:
             if thinking_level:
                 kwargs["thinking_level"] = thinking_level
 
-        elif provider == "openai":
+        elif provider in ("openai", "codex", "openai_codex_oauth"):
             reasoning_effort = self.config.get("openai_reasoning_effort")
             if reasoning_effort:
                 kwargs["reasoning_effort"] = reasoning_effort
