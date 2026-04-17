@@ -34,11 +34,46 @@ from tradingagents.agents.utils.agent_utils import (
 )
 
 from .conditional_logic import ConditionalLogic
-from .persistence import PersistentInMemorySaver
+from .persistence import PersistentInMemorySaver, detect_rate_limit_error
 from .setup import GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
 from .signal_processing import SignalProcessor
+
+
+class RateLimitFallbackLLM:
+    def __init__(self, primary_llm, fallback_llm):
+        self.primary_llm = primary_llm
+        self.fallback_llm = fallback_llm
+        self.model = getattr(primary_llm, "model", None)
+        self.primary_model = getattr(primary_llm, "model", None)
+        self.fallback_model = getattr(fallback_llm, "model", None)
+
+    def invoke(self, *args, **kwargs):
+        try:
+            return self.primary_llm.invoke(*args, **kwargs)
+        except Exception as error:
+            if (
+                not detect_rate_limit_error(error)
+                or self.fallback_llm is None
+                or self.fallback_llm is self.primary_llm
+            ):
+                raise
+            return self.fallback_llm.invoke(*args, **kwargs)
+
+    def __getattr__(self, item):
+        return getattr(self.primary_llm, item)
+
+
+def build_manager_llm(provider: str, primary_llm, fallback_llm):
+    normalized_provider = (provider or "").lower()
+    if (
+        normalized_provider == "claude_code"
+        and fallback_llm is not None
+        and fallback_llm is not primary_llm
+    ):
+        return RateLimitFallbackLLM(primary_llm, fallback_llm)
+    return primary_llm
 
 
 class TradingAgentsGraph:
@@ -95,14 +130,16 @@ class TradingAgentsGraph:
 
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
-        self.research_manager_llm = self.deep_thinking_llm
-        self.portfolio_manager_llm = self.deep_thinking_llm
-        if (
-            self.config["llm_provider"] == "claude_code"
-            and str(self.config["deep_think_llm"]).lower().startswith("claude-opus")
-        ):
-            self.research_manager_llm = self.quick_thinking_llm
-            self.portfolio_manager_llm = self.quick_thinking_llm
+        self.research_manager_llm = build_manager_llm(
+            self.config["llm_provider"],
+            self.deep_thinking_llm,
+            self.quick_thinking_llm,
+        )
+        self.portfolio_manager_llm = build_manager_llm(
+            self.config["llm_provider"],
+            self.deep_thinking_llm,
+            self.quick_thinking_llm,
+        )
         
         # Initialize memories
         self.bull_memory = FinancialSituationMemory("bull_memory", self.config)
