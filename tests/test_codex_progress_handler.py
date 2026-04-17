@@ -51,6 +51,21 @@ class TestCodexProgressCallbackHandler(unittest.TestCase):
         self.assertIn("background log", latest["stderr"])
         self.assertEqual(tool_calls, [("lookup_quote", {"symbol": "NVDA"})])
 
+    def test_progress_handler_accepts_generic_provider_and_tool_callbacks(self):
+        updates = []
+        handler = CodexProgressCallbackHandler(
+            on_live_update=lambda payload: updates.append(payload.copy()),
+        )
+
+        handler.on_provider_event({"type": "status", "text": "Starting Claude response"})
+        handler.on_provider_event({"type": "assistant_delta", "item_id": "a1", "delta": "Hello"})
+        handler.on_tool_start({"name": "get_stock_data"}, '{"ticker":"NVDA"}')
+
+        latest = updates[-1]
+        self.assertEqual(latest["status"], "Starting Claude response")
+        self.assertEqual(latest["assistant"], "Hello")
+        self.assertIn("get_stock_data", latest["tool"])
+
 
 if __name__ == "__main__":
     unittest.main()

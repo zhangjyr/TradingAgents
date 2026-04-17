@@ -76,7 +76,7 @@ class StatsCallbackHandler(BaseCallbackHandler):
             }
 
 
-class CodexProgressCallbackHandler(BaseCallbackHandler):
+class LiveProgressCallbackHandler(BaseCallbackHandler):
     def __init__(self, on_live_update, on_message=None, on_tool_call=None) -> None:
         super().__init__()
         self._lock = threading.Lock()
@@ -91,6 +91,52 @@ class CodexProgressCallbackHandler(BaseCallbackHandler):
         self._tool_status = ""
 
     def on_codex_event(self, event: Dict[str, Any], **kwargs: Any) -> None:
+        self._handle_event(event)
+
+    def on_provider_event(self, event: Dict[str, Any], **kwargs: Any) -> None:
+        self._handle_event(event)
+
+    def on_chat_model_start(
+        self,
+        serialized: Dict[str, Any],
+        messages: List[List[Any]],
+        **kwargs: Any,
+    ) -> None:
+        if self._status:
+            return
+        name = serialized.get("name") if isinstance(serialized, dict) else None
+        provider_name = str(name).strip() if isinstance(name, str) else "LLM"
+        self._handle_event({"type": "status", "text": f"Starting {provider_name}"})
+
+    def on_tool_start(
+        self,
+        serialized: Dict[str, Any],
+        input_str: str,
+        **kwargs: Any,
+    ) -> None:
+        tool_name = ""
+        if isinstance(serialized, dict):
+            tool_name = str(serialized.get("name", "")).strip()
+        self._handle_event(
+            {
+                "type": "tool_call",
+                "tool": tool_name or "tool",
+                "arguments": {"input": input_str[:400]},
+            }
+        )
+
+    def on_tool_end(self, output: Any, **kwargs: Any) -> None:
+        tool_name = str(kwargs.get("name", "")).strip() or "tool"
+        self._handle_event({"type": "tool_result", "tool": tool_name, "status": "completed"})
+
+    def on_tool_error(self, error: BaseException, **kwargs: Any) -> None:
+        tool_name = str(kwargs.get("name", "")).strip() or "tool"
+        self._handle_event({"type": "tool_result", "tool": tool_name, "status": f"error: {error}"})
+
+    def on_llm_error(self, error: BaseException, **kwargs: Any) -> None:
+        self._handle_event({"type": "error", "text": str(error)})
+
+    def _handle_event(self, event: Dict[str, Any]) -> None:
         with self._lock:
             event_type = str(event.get("type", "")).strip()
             if event_type == "status":
@@ -122,7 +168,7 @@ class CodexProgressCallbackHandler(BaseCallbackHandler):
                 if text:
                     self._status = f"error: {text}"
                     if self._on_message:
-                        self._on_message("Codex", text)
+                        self._on_message("Provider", text)
             self._publish()
 
     def _append_delta(self, bucket: Dict[str, str], event: Dict[str, Any]) -> None:
@@ -148,3 +194,6 @@ class CodexProgressCallbackHandler(BaseCallbackHandler):
             return ""
         last_key = next(reversed(bucket))
         return bucket[last_key][-1200:]
+
+
+CodexProgressCallbackHandler = LiveProgressCallbackHandler

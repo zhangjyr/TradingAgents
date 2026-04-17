@@ -1,6 +1,12 @@
 from langchain_core.messages import AIMessage
-import time
-import json
+
+
+def _compact_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 2
+    tail = max_chars - head
+    return text[:head] + "\n\n[...]\n\n" + text[-tail:]
 
 
 def create_bull_researcher(llm, memory):
@@ -22,6 +28,13 @@ def create_bull_researcher(llm, memory):
         for i, rec in enumerate(past_memories, 1):
             past_memory_str += rec["recommendation"] + "\n\n"
 
+        market_research_report = _compact_text(market_research_report, 2200)
+        sentiment_report = _compact_text(sentiment_report, 2200)
+        news_report = _compact_text(news_report, 2200)
+        fundamentals_report = _compact_text(fundamentals_report, 2600)
+        prompt_history = _compact_text(history, 5000)
+        prompt_current_response = _compact_text(current_response, 3500)
+
         prompt = f"""You are a Bull Analyst advocating for investing in the stock. Your task is to build a strong, evidence-based case emphasizing growth potential, competitive advantages, and positive market indicators. Leverage the provided research and data to address concerns and counter bearish arguments effectively.
 
 Key points to focus on:
@@ -36,12 +49,11 @@ Market research report: {market_research_report}
 Social media sentiment report: {sentiment_report}
 Latest world affairs news: {news_report}
 Company fundamentals report: {fundamentals_report}
-Conversation history of the debate: {history}
-Last bear argument: {current_response}
+Conversation history of the debate: {prompt_history}
+Last bear argument: {prompt_current_response}
 Reflections from similar situations and lessons learned: {past_memory_str}
 Use this information to deliver a compelling bull argument, refute the bear's concerns, and engage in a dynamic debate that demonstrates the strengths of the bull position. You must also address reflections and learn from lessons and mistakes you made in the past.
 """
-
         response = llm.invoke(prompt)
 
         argument = f"Bull Analyst: {response.content}"

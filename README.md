@@ -126,6 +126,7 @@ TradingAgents supports multiple LLM providers. Set the API key for your chosen p
 export OPENAI_API_KEY=...          # OpenAI (GPT)
 export GOOGLE_API_KEY=...          # Google (Gemini)
 export ANTHROPIC_API_KEY=...       # Anthropic (Claude)
+export CLAUDE_CODE_OAUTH_TOKEN=... # Optional override for Claude Code subscription auth
 export XAI_API_KEY=...             # xAI (Grok)
 export OPENROUTER_API_KEY=...      # OpenRouter
 export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
@@ -142,6 +143,20 @@ codex login
 
 This stores your Codex credential at `~/.codex/auth.json`. When you choose `codex` in TradingAgents, it will launch `codex app-server --listen stdio://` and reuse that login. If you use a custom Codex home, set `CODEX_HOME` so TradingAgents can find `auth.json`.
 
+For Claude Code subscription auth, TradingAgents can reuse the credential created by the Claude Code CLI:
+
+```bash
+claude login
+```
+
+TradingAgents looks for the OAuth token in this order:
+
+- `CLAUDE_CODE_OAUTH_TOKEN`
+- `~/.claude/.credentials.json` or `$CLAUDE_CONFIG_DIR/.credentials.json`
+- macOS Keychain entry used by Claude Code
+
+When you choose `claude_code` in TradingAgents, it uses that OAuth token to call Anthropic with your Claude subscription login instead of an API key.
+
 Alternatively, copy `.env.example` to `.env` and fill in your keys:
 ```bash
 cp .env.example .env
@@ -156,7 +171,7 @@ python -m cli.main     # alternative: run directly from source
 ```
 You will see a screen where you can select your desired tickers, analysis date, LLM provider, research depth, and more.
 
-If you select `codex`, make sure you have already completed `codex login`. TradingAgents validates that a Codex credential is available before starting the run.
+If you select `codex`, make sure you have already completed `codex login`. If you select `claude_code`, make sure you have already completed `claude login`. TradingAgents validates that the required credential is available before starting the run.
 
 <p align="center">
   <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">
@@ -176,7 +191,7 @@ An interface will appear showing results as they load, letting you track the age
 
 ### Implementation Details
 
-We built TradingAgents with LangGraph to ensure flexibility and modularity. The framework supports multiple LLM providers: OpenAI, Codex, Google, Anthropic, xAI, OpenRouter, and Ollama.
+We built TradingAgents with LangGraph to ensure flexibility and modularity. The framework supports multiple LLM providers: OpenAI, Codex, Claude Code, Google, Anthropic, xAI, OpenRouter, and Ollama.
 
 ### Python Usage
 
@@ -200,7 +215,7 @@ from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
 
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "openai"        # openai, codex, google, anthropic, xai, openrouter, ollama
+config["llm_provider"] = "openai"        # openai, codex, claude_code, google, anthropic, xai, openrouter, ollama
 config["deep_think_llm"] = "gpt-5.4"     # Model for complex reasoning
 config["quick_think_llm"] = "gpt-5.4-mini" # Model for quick tasks
 config["max_debate_rounds"] = 2

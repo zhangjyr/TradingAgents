@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Any, Optional
 import datetime
 import typer
 from pathlib import Path
@@ -19,18 +19,31 @@ from rich.table import Table
 from collections import deque
 import time
 import threading
+import uuid
 from rich.tree import Tree
 from rich import box
 from rich.align import Align
 from rich.rule import Rule
 
+from tradingagents.graph.persistence import (
+    build_run_signature,
+    clear_resume_files,
+    compute_retry_delay,
+    detect_rate_limit_error,
+    is_resumable_run_state,
+    load_json_file,
+    save_json_file,
+    snapshot_graph_state,
+    summarize_graph_state,
+)
 from tradingagents.graph.trading_graph import TradingAgentsGraph
+from tradingagents.llm_clients.claude_code_client import get_claude_credentials_path, has_claude_code_auth
 from tradingagents.llm_clients.codex_client import get_codex_auth_path, has_codex_auth
 from tradingagents.default_config import DEFAULT_CONFIG
 from cli.models import AnalystType
 from cli.utils import *
 from cli.announcements import fetch_announcements, display_announcements
-from cli.stats_handler import CodexProgressCallbackHandler, StatsCallbackHandler
+from cli.stats_handler import LiveProgressCallbackHandler, StatsCallbackHandler
 
 console = Console()
 
@@ -188,17 +201,17 @@ class MessageBuffer:
     def render_live_activity(self):
         sections = []
         if self.live_activity["status"]:
-            sections.append(f"### Codex Status\n{self.live_activity['status']}")
+            sections.append(f"### Live Status\n{self.live_activity['status']}")
         if self.live_activity["reasoning"]:
-            sections.append(f"### Codex Thinking\n{self.live_activity['reasoning']}")
+            sections.append(f"### Live Thinking\n{self.live_activity['reasoning']}")
         if self.live_activity["plan"]:
-            sections.append(f"### Codex Plan\n{self.live_activity['plan']}")
+            sections.append(f"### Live Plan\n{self.live_activity['plan']}")
         if self.live_activity["assistant"]:
-            sections.append(f"### Codex Draft Reply\n{self.live_activity['assistant']}")
+            sections.append(f"### Live Draft Reply\n{self.live_activity['assistant']}")
         if self.live_activity["tool"]:
-            sections.append(f"### Codex Tool Activity\n{self.live_activity['tool']}")
+            sections.append(f"### Live Tool Activity\n{self.live_activity['tool']}")
         if self.live_activity["stderr"]:
-            sections.append(f"### Codex App Server Logs\n{self.live_activity['stderr']}")
+            sections.append(f"### Live Provider Logs\n{self.live_activity['stderr']}")
         return "\n\n".join(section[-4000:] for section in sections if section)
 
     def _update_current_report(self):
@@ -627,6 +640,19 @@ def get_user_selections():
                 f"\n[red]No Codex credential found at {codex_auth_path}. Run `codex login` and try again.[/red]"
             )
             exit(1)
+    elif provider_lower == "claude_code":
+        claude_credentials_path = get_claude_credentials_path()
+        if not has_claude_code_auth():
+            console.print(
+                create_question_box(
+                    "Step 6b: Claude Login Required",
+                    f"Run `claude login` first so TradingAgents can reuse the Claude Code credential at {claude_credentials_path}"
+                )
+            )
+            console.print(
+                f"\n[red]No Claude Code credential found. Run `claude login` or set CLAUDE_CODE_OAUTH_TOKEN and try again.[/red]"
+            )
+            exit(1)
 
     # Step 7: Thinking agents
     console.print(
@@ -659,7 +685,7 @@ def get_user_selections():
             )
         )
         reasoning_effort = ask_openai_reasoning_effort()
-    elif provider_lower == "anthropic":
+    elif provider_lower in ("anthropic", "claude_code"):
         console.print(
             create_question_box(
                 "Step 8: Effort Level",
@@ -998,9 +1024,66 @@ def format_tool_args(args, max_length=80) -> str:
         return result[:max_length - 3] + "..."
     return result
 
+
+def restore_saved_report_sections(message_buffer, report_dir: Path) -> None:
+    for section_name in message_buffer.report_sections.keys():
+        section_path = report_dir / f"{section_name}.md"
+        if section_path.exists():
+            message_buffer.update_report_section(section_name, section_path.read_text())
+
+
+def build_resume_paths(results_dir: Path) -> dict[str, Path]:
+    return {
+        "metadata": results_dir / "run_state.json",
+        "snapshot": results_dir / "latest_state.json",
+        "checkpoint": results_dir / "graph_checkpoint.pkl",
+    }
+
+
+def prompt_for_resume_choice(existing_run_state: dict[str, Any]) -> bool:
+    last_stage = existing_run_state.get("last_stage", "unknown")
+    status = existing_run_state.get("status", "paused")
+    prompt = (
+        f"Found a saved {status} run at stage '{last_stage}'. "
+        "Resume it? [R]esume/[N]ew"
+    )
+    choice = typer.prompt(prompt, default="R").strip().upper()
+    return choice in {"R", "RESUME", "Y", "YES", ""}
+
+
 def run_analysis():
     # First get all user selections
     selections = get_user_selections()
+
+    selected_set = {analyst.value for analyst in selections["analysts"]}
+    selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
+
+    results_dir = Path(DEFAULT_CONFIG["results_dir"]) / selections["ticker"] / selections["analysis_date"]
+    results_dir.mkdir(parents=True, exist_ok=True)
+    report_dir = results_dir / "reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    log_file = results_dir / "message_tool.log"
+    log_file.touch(exist_ok=True)
+    resume_paths = build_resume_paths(results_dir)
+    run_signature = build_run_signature(selections, selected_analyst_keys)
+    existing_run_state = load_json_file(resume_paths["metadata"]) or {}
+    resumable_run_exists = is_resumable_run_state(
+        existing_run_state,
+        run_signature,
+        resume_paths["checkpoint"],
+    )
+    can_resume = resumable_run_exists and prompt_for_resume_choice(existing_run_state)
+    if resumable_run_exists and not can_resume:
+        clear_resume_files(
+            resume_paths["metadata"],
+            resume_paths["snapshot"],
+            resume_paths["checkpoint"],
+        )
+    thread_id = (
+        str(existing_run_state.get("thread_id"))
+        if can_resume and existing_run_state.get("thread_id")
+        else uuid.uuid4().hex
+    )
 
     # Create config with selected research depth
     config = DEFAULT_CONFIG.copy()
@@ -1015,40 +1098,30 @@ def run_analysis():
     config["openai_reasoning_effort"] = selections.get("openai_reasoning_effort")
     config["anthropic_effort"] = selections.get("anthropic_effort")
     config["output_language"] = selections.get("output_language", "English")
+    config["checkpoint_path"] = str(resume_paths["checkpoint"])
 
-    # Create callback handlers for tracking LLM/tool calls and Codex progress
     stats_handler = StatsCallbackHandler()
-    codex_progress_handler = CodexProgressCallbackHandler(
+    live_progress_handler = LiveProgressCallbackHandler(
         on_live_update=lambda payload: message_buffer.update_live_activity(payload),
         on_message=lambda message_type, content: message_buffer.add_message(message_type, content),
         on_tool_call=lambda tool_name, args: message_buffer.add_tool_call(tool_name, args if isinstance(args, dict) else {"value": args}),
     )
-
-    # Normalize analyst selection to predefined order (selection is a 'set', order is fixed)
-    selected_set = {analyst.value for analyst in selections["analysts"]}
-    selected_analyst_keys = [a for a in ANALYST_ORDER if a in selected_set]
 
     # Initialize the graph with callbacks bound to LLMs
     graph = TradingAgentsGraph(
         selected_analyst_keys,
         config=config,
         debug=True,
-        callbacks=[stats_handler, codex_progress_handler],
+        callbacks=[stats_handler, live_progress_handler],
     )
 
     # Initialize message buffer with selected analysts
     message_buffer.init_for_analysis(selected_analyst_keys)
+    if can_resume:
+        restore_saved_report_sections(message_buffer, report_dir)
 
     # Track start time for elapsed display
     start_time = time.time()
-
-    # Create result directory
-    results_dir = Path(config["results_dir"]) / selections["ticker"] / selections["analysis_date"]
-    results_dir.mkdir(parents=True, exist_ok=True)
-    report_dir = results_dir / "reports"
-    report_dir.mkdir(parents=True, exist_ok=True)
-    log_file = results_dir / "message_tool.log"
-    log_file.touch(exist_ok=True)
 
     def save_message_decorator(obj, func_name):
         func = getattr(obj, func_name)
@@ -1096,6 +1169,35 @@ def run_analysis():
     display_state = {"spinner_text": None}
     stop_live_refresh = threading.Event()
 
+    def persist_graph_progress(state_values=None):
+        if isinstance(state_values, dict):
+            save_json_file(resume_paths["snapshot"], snapshot_graph_state(state_values))
+            run_state["last_stage"] = summarize_graph_state(state_values)
+        run_state["updated_at"] = time.time()
+        save_json_file(resume_paths["metadata"], run_state)
+        if graph.checkpointer is not None:
+            graph.checkpointer.persist()
+
+    def get_latest_graph_state():
+        latest_state = graph.graph.get_state(args["config"])
+        if latest_state and isinstance(latest_state.values, dict):
+            persist_graph_progress(latest_state.values)
+        if latest_state:
+            run_state["next_nodes"] = list(latest_state.next)
+            checkpoint_cfg = latest_state.config.get("configurable", {})
+            checkpoint_id = checkpoint_cfg.get("checkpoint_id")
+            if checkpoint_id:
+                run_state["checkpoint_id"] = checkpoint_id
+        return latest_state
+
+    def pause_current_run(status: str, error: BaseException | str, extra_message: str):
+        run_state["status"] = status
+        run_state["last_error"] = str(error)
+        get_latest_graph_state()
+        persist_graph_progress()
+        message_buffer.add_message("System", extra_message)
+        update_display(layout, stats_handler=stats_handler, start_time=start_time)
+
     def refresh_live_display():
         while not stop_live_refresh.is_set():
             update_display(
@@ -1121,6 +1223,8 @@ def run_analysis():
             "System",
             f"Selected analysts: {', '.join(analyst.value for analyst in selections['analysts'])}",
         )
+        if can_resume:
+            message_buffer.add_message("System", "Found a paused rate-limited run. Resuming from the last saved checkpoint.")
         update_display(layout, stats_handler=stats_handler, start_time=start_time)
 
         # Update agent status to in_progress for the first analyst
@@ -1136,124 +1240,218 @@ def run_analysis():
         update_display(layout, spinner_text, stats_handler=stats_handler, start_time=start_time)
 
         # Initialize state and get graph args with callbacks
-        init_agent_state = graph.propagator.create_initial_state(
-            selections["ticker"], selections["analysis_date"]
+        init_agent_state = None
+        if not can_resume:
+            init_agent_state = graph.propagator.create_initial_state(
+                selections["ticker"], selections["analysis_date"]
+            )
+        args = graph.propagator.get_graph_args(
+            callbacks=[stats_handler, live_progress_handler],
+            thread_id=thread_id,
         )
-        # Pass callbacks to graph config for tool execution tracking
-        # (LLM tracking is handled separately via LLM constructor)
-        args = graph.propagator.get_graph_args(callbacks=[stats_handler])
+        run_state = {
+            "status": "running",
+            "signature": run_signature,
+            "thread_id": thread_id,
+            "ticker": selections["ticker"],
+            "analysis_date": selections["analysis_date"],
+            "provider": selections["llm_provider"].lower(),
+            "updated_at": time.time(),
+            "resume_count": int(existing_run_state.get("resume_count", 0)) + (1 if can_resume else 0),
+            "retry_attempt": 0,
+            "total_retry_wait_seconds": 0,
+        }
+        save_json_file(resume_paths["metadata"], run_state)
 
+        trace = []
+        paused_run = False
         try:
-            # Stream the analysis
-            trace = []
-            for chunk in graph.graph.stream(init_agent_state, **args):
-                # Process messages if present (skip duplicates via message ID)
-                if len(chunk["messages"]) > 0:
-                    last_message = chunk["messages"][-1]
-                    msg_id = getattr(last_message, "id", None)
+            current_input = init_agent_state
+            while True:
+                try:
+                    for chunk in graph.graph.stream(current_input, **args):
+                        current_input = None
+                        # Process messages if present (skip duplicates via message ID)
+                        if len(chunk["messages"]) > 0:
+                            last_message = chunk["messages"][-1]
+                            msg_id = getattr(last_message, "id", None)
 
-                    if msg_id != message_buffer._last_message_id:
-                        message_buffer._last_message_id = msg_id
+                            if msg_id != message_buffer._last_message_id:
+                                message_buffer._last_message_id = msg_id
 
-                        # Add message to buffer
-                        msg_type, content = classify_message_type(last_message)
-                        if content and content.strip():
-                            message_buffer.add_message(msg_type, content)
+                                # Add message to buffer
+                                msg_type, content = classify_message_type(last_message)
+                                if content and content.strip():
+                                    message_buffer.add_message(msg_type, content)
 
-                        # Handle tool calls
-                        if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                            for tool_call in last_message.tool_calls:
-                                if isinstance(tool_call, dict):
-                                    message_buffer.add_tool_call(
-                                        tool_call["name"], tool_call["args"]
-                                    )
-                                else:
-                                    message_buffer.add_tool_call(tool_call.name, tool_call.args)
+                                # Handle tool calls
+                                if hasattr(last_message, "tool_calls") and last_message.tool_calls:
+                                    for tool_call in last_message.tool_calls:
+                                        if isinstance(tool_call, dict):
+                                            message_buffer.add_tool_call(
+                                                tool_call["name"], tool_call["args"]
+                                            )
+                                        else:
+                                            message_buffer.add_tool_call(tool_call.name, tool_call.args)
 
-                # Update analyst statuses based on report state (runs on every chunk)
-                update_analyst_statuses(message_buffer, chunk)
+                        # Update analyst statuses based on report state (runs on every chunk)
+                        update_analyst_statuses(message_buffer, chunk)
 
-                # Research Team - Handle Investment Debate State
-                if chunk.get("investment_debate_state"):
-                    debate_state = chunk["investment_debate_state"]
-                    bull_hist = debate_state.get("bull_history", "").strip()
-                    bear_hist = debate_state.get("bear_history", "").strip()
-                    judge = debate_state.get("judge_decision", "").strip()
+                        # Research Team - Handle Investment Debate State
+                        if chunk.get("investment_debate_state"):
+                            debate_state = chunk["investment_debate_state"]
+                            bull_hist = debate_state.get("bull_history", "").strip()
+                            bear_hist = debate_state.get("bear_history", "").strip()
+                            judge = debate_state.get("judge_decision", "").strip()
 
-                    # Only update status when there's actual content
-                    if bull_hist or bear_hist:
-                        update_research_team_status("in_progress")
-                    if bull_hist:
-                        message_buffer.update_report_section(
-                            "investment_plan", f"### Bull Researcher Analysis\n{bull_hist}"
-                        )
-                    if bear_hist:
-                        message_buffer.update_report_section(
-                            "investment_plan", f"### Bear Researcher Analysis\n{bear_hist}"
-                        )
-                    if judge:
-                        message_buffer.update_report_section(
-                            "investment_plan", f"### Research Manager Decision\n{judge}"
-                        )
-                        update_research_team_status("completed")
-                        message_buffer.update_agent_status("Trader", "in_progress")
+                            if bull_hist or bear_hist:
+                                update_research_team_status("in_progress")
+                            if bull_hist:
+                                message_buffer.update_report_section(
+                                    "investment_plan", f"### Bull Researcher Analysis\n{bull_hist}"
+                                )
+                            if bear_hist:
+                                message_buffer.update_report_section(
+                                    "investment_plan", f"### Bear Researcher Analysis\n{bear_hist}"
+                                )
+                            if judge:
+                                message_buffer.update_report_section(
+                                    "investment_plan", f"### Research Manager Decision\n{judge}"
+                                )
+                                update_research_team_status("completed")
+                                message_buffer.update_agent_status("Trader", "in_progress")
 
-                # Trading Team
-                if chunk.get("trader_investment_plan"):
-                    message_buffer.update_report_section(
-                        "trader_investment_plan", chunk["trader_investment_plan"]
-                    )
-                    if message_buffer.agent_status.get("Trader") != "completed":
-                        message_buffer.update_agent_status("Trader", "completed")
-                        message_buffer.update_agent_status("Aggressive Analyst", "in_progress")
-
-                # Risk Management Team - Handle Risk Debate State
-                if chunk.get("risk_debate_state"):
-                    risk_state = chunk["risk_debate_state"]
-                    agg_hist = risk_state.get("aggressive_history", "").strip()
-                    con_hist = risk_state.get("conservative_history", "").strip()
-                    neu_hist = risk_state.get("neutral_history", "").strip()
-                    judge = risk_state.get("judge_decision", "").strip()
-
-                    if agg_hist:
-                        if message_buffer.agent_status.get("Aggressive Analyst") != "completed":
-                            message_buffer.update_agent_status("Aggressive Analyst", "in_progress")
-                        message_buffer.update_report_section(
-                            "final_trade_decision", f"### Aggressive Analyst Analysis\n{agg_hist}"
-                        )
-                    if con_hist:
-                        if message_buffer.agent_status.get("Conservative Analyst") != "completed":
-                            message_buffer.update_agent_status("Conservative Analyst", "in_progress")
-                        message_buffer.update_report_section(
-                            "final_trade_decision", f"### Conservative Analyst Analysis\n{con_hist}"
-                        )
-                    if neu_hist:
-                        if message_buffer.agent_status.get("Neutral Analyst") != "completed":
-                            message_buffer.update_agent_status("Neutral Analyst", "in_progress")
-                        message_buffer.update_report_section(
-                            "final_trade_decision", f"### Neutral Analyst Analysis\n{neu_hist}"
-                        )
-                    if judge:
-                        if message_buffer.agent_status.get("Portfolio Manager") != "completed":
-                            message_buffer.update_agent_status("Portfolio Manager", "in_progress")
+                        if chunk.get("trader_investment_plan"):
                             message_buffer.update_report_section(
-                                "final_trade_decision", f"### Portfolio Manager Decision\n{judge}"
+                                "trader_investment_plan", chunk["trader_investment_plan"]
                             )
-                            message_buffer.update_agent_status("Aggressive Analyst", "completed")
-                            message_buffer.update_agent_status("Conservative Analyst", "completed")
-                            message_buffer.update_agent_status("Neutral Analyst", "completed")
-                            message_buffer.update_agent_status("Portfolio Manager", "completed")
+                            if message_buffer.agent_status.get("Trader") != "completed":
+                                message_buffer.update_agent_status("Trader", "completed")
+                                message_buffer.update_agent_status("Aggressive Analyst", "in_progress")
 
-                # Update the display
-                update_display(layout, stats_handler=stats_handler, start_time=start_time)
+                        if chunk.get("risk_debate_state"):
+                            risk_state = chunk["risk_debate_state"]
+                            agg_hist = risk_state.get("aggressive_history", "").strip()
+                            con_hist = risk_state.get("conservative_history", "").strip()
+                            neu_hist = risk_state.get("neutral_history", "").strip()
+                            judge = risk_state.get("judge_decision", "").strip()
 
-                trace.append(chunk)
+                            if agg_hist:
+                                if message_buffer.agent_status.get("Aggressive Analyst") != "completed":
+                                    message_buffer.update_agent_status("Aggressive Analyst", "in_progress")
+                                message_buffer.update_report_section(
+                                    "final_trade_decision", f"### Aggressive Analyst Analysis\n{agg_hist}"
+                                )
+                            if con_hist:
+                                if message_buffer.agent_status.get("Conservative Analyst") != "completed":
+                                    message_buffer.update_agent_status("Conservative Analyst", "in_progress")
+                                message_buffer.update_report_section(
+                                    "final_trade_decision", f"### Conservative Analyst Analysis\n{con_hist}"
+                                )
+                            if neu_hist:
+                                if message_buffer.agent_status.get("Neutral Analyst") != "completed":
+                                    message_buffer.update_agent_status("Neutral Analyst", "in_progress")
+                                message_buffer.update_report_section(
+                                    "final_trade_decision", f"### Neutral Analyst Analysis\n{neu_hist}"
+                                )
+                            if judge:
+                                if message_buffer.agent_status.get("Portfolio Manager") != "completed":
+                                    message_buffer.update_agent_status("Portfolio Manager", "in_progress")
+                                    message_buffer.update_report_section(
+                                        "final_trade_decision", f"### Portfolio Manager Decision\n{judge}"
+                                    )
+                                    message_buffer.update_agent_status("Aggressive Analyst", "completed")
+                                    message_buffer.update_agent_status("Conservative Analyst", "completed")
+                                    message_buffer.update_agent_status("Neutral Analyst", "completed")
+                                    message_buffer.update_agent_status("Portfolio Manager", "completed")
+
+                        update_display(layout, stats_handler=stats_handler, start_time=start_time)
+
+                        trace.append(chunk)
+                        persist_graph_progress(chunk)
+
+                    break
+                except KeyboardInterrupt as error:
+                    paused_run = True
+                    pause_current_run(
+                        "paused_manual_exit",
+                        error,
+                        f"Run paused manually. Progress saved in {results_dir}. Re-run the same analysis to resume or choose a fresh start.",
+                    )
+                    break
+                except Exception as error:
+                    if not detect_rate_limit_error(error):
+                        run_state["status"] = "failed"
+                        run_state["last_error"] = str(error)
+                        persist_graph_progress()
+                        raise
+
+                    run_state["retry_attempt"] = int(run_state.get("retry_attempt", 0)) + 1
+                    pause_current_run(
+                        "paused_rate_limit",
+                        error,
+                        f"Rate limit encountered: {error}",
+                    )
+                    retry_delay = compute_retry_delay(
+                        run_state["retry_attempt"],
+                        int(run_state.get("total_retry_wait_seconds", 0)),
+                    )
+                    if retry_delay <= 0:
+                        paused_run = True
+                        message_buffer.add_message(
+                            "System",
+                            f"Maximum automatic backoff reached. Progress saved in {results_dir}. Re-run the same analysis later to resume.",
+                        )
+                        update_display(layout, stats_handler=stats_handler, start_time=start_time)
+                        break
+
+                    message_buffer.add_message(
+                        "System",
+                        f"Waiting {retry_delay}s before retrying from the saved checkpoint. Press Ctrl+C to exit and resume later.",
+                    )
+                    for remaining in range(retry_delay, 0, -1):
+                        try:
+                            display_state["spinner_text"] = (
+                                f"Rate limited. Retrying {selections['ticker']} in {remaining}s..."
+                            )
+                            message_buffer.update_live_activity(
+                                {"status": f"Rate limited. Retrying in {remaining}s"}
+                            )
+                            update_display(layout, stats_handler=stats_handler, start_time=start_time)
+                            time.sleep(1)
+                        except KeyboardInterrupt as interrupt_error:
+                            paused_run = True
+                            pause_current_run(
+                                "paused_manual_exit",
+                                interrupt_error,
+                                f"Run paused during backoff wait. Progress saved in {results_dir}. Re-run the same analysis to resume or choose a fresh start.",
+                            )
+                            break
+                    if paused_run:
+                        break
+                    run_state["status"] = "running"
+                    run_state["total_retry_wait_seconds"] = int(
+                        run_state.get("total_retry_wait_seconds", 0)
+                    ) + retry_delay
+                    persist_graph_progress()
+                    display_state["spinner_text"] = spinner_text
+                    current_input = None
+                    continue
         finally:
             stop_live_refresh.set()
             refresh_thread.join(timeout=1)
 
+        if paused_run:
+            return
+
         # Get final state and decision
         final_state = trace[-1]
+        run_state["status"] = "completed"
+        run_state["updated_at"] = time.time()
+        run_state["last_stage"] = summarize_graph_state(final_state)
+        save_json_file(resume_paths["metadata"], run_state)
+        if graph.checkpointer is not None:
+            graph.checkpointer.persist()
         decision = graph.process_signal(final_state["final_trade_decision"])
 
         # Update all agent statuses to completed

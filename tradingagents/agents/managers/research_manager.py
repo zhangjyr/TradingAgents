@@ -1,7 +1,12 @@
-import time
-import json
-
 from tradingagents.agents.utils.agent_utils import build_instrument_context
+
+
+def _compact_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 2
+    tail = max_chars - head
+    return text[:head] + "\n\n[...]\n\n" + text[-tail:]
 
 
 def create_research_manager(llm, memory):
@@ -14,6 +19,8 @@ def create_research_manager(llm, memory):
         fundamentals_report = state["fundamentals_report"]
 
         investment_debate_state = state["investment_debate_state"]
+        bull_history = investment_debate_state.get("bull_history", "")
+        bear_history = investment_debate_state.get("bear_history", "")
 
         curr_situation = f"{market_research_report}\n\n{sentiment_report}\n\n{news_report}\n\n{fundamentals_report}"
         past_memories = memory.get_memories(curr_situation, n_matches=2)
@@ -21,6 +28,14 @@ def create_research_manager(llm, memory):
         past_memory_str = ""
         for i, rec in enumerate(past_memories, 1):
             past_memory_str += rec["recommendation"] + "\n\n"
+
+        market_research_report = _compact_text(market_research_report, 2200)
+        sentiment_report = _compact_text(sentiment_report, 2200)
+        news_report = _compact_text(news_report, 2200)
+        fundamentals_report = _compact_text(fundamentals_report, 2600)
+        bull_history = _compact_text(bull_history, 5000)
+        bear_history = _compact_text(bear_history, 5000)
+        history = _compact_text(history, 7000)
 
         prompt = f"""As the portfolio manager and debate facilitator, your role is to critically evaluate this round of debate and make a definitive decision: align with the bear analyst, the bull analyst, or choose Hold only if it is strongly justified based on the arguments presented.
 
@@ -38,8 +53,25 @@ Here are your past reflections on mistakes:
 
 {instrument_context}
 
-Here is the debate:
-Debate History:
+Market research summary:
+{market_research_report}
+
+Sentiment summary:
+{sentiment_report}
+
+News summary:
+{news_report}
+
+Fundamentals summary:
+{fundamentals_report}
+
+Bull analyst case:
+{bull_history}
+
+Bear analyst case:
+{bear_history}
+
+Debate history excerpt:
 {history}"""
         response = llm.invoke(prompt)
 

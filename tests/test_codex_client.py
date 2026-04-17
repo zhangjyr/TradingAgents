@@ -2,10 +2,25 @@ import sys
 import types
 import unittest
 
-langchain_openai = types.ModuleType("langchain_openai")
-langchain_anthropic = types.ModuleType("langchain_anthropic")
-langchain_google_genai = types.ModuleType("langchain_google_genai")
-langchain_core_messages = types.ModuleType("langchain_core.messages")
+try:
+    import langchain_openai  # type: ignore
+except Exception:
+    langchain_openai = types.ModuleType("langchain_openai")
+
+try:
+    import langchain_anthropic  # type: ignore
+except Exception:
+    langchain_anthropic = types.ModuleType("langchain_anthropic")
+
+try:
+    import langchain_google_genai  # type: ignore
+except Exception:
+    langchain_google_genai = types.ModuleType("langchain_google_genai")
+
+try:
+    import langchain_core.messages as langchain_core_messages  # type: ignore
+except Exception:
+    langchain_core_messages = types.ModuleType("langchain_core.messages")
 
 
 class ChatOpenAI:
@@ -37,6 +52,10 @@ class AIMessage(BaseMessage):
     type = "ai"
 
 
+class AIMessageChunk(AIMessage):
+    pass
+
+
 class ToolMessage(BaseMessage):
     type = "tool"
 
@@ -45,14 +64,20 @@ class ToolMessage(BaseMessage):
         self.tool_call_id = tool_call_id
 
 
-langchain_openai.ChatOpenAI = ChatOpenAI
-langchain_anthropic.ChatAnthropic = ChatAnthropic
-langchain_google_genai.ChatGoogleGenerativeAI = ChatGoogleGenerativeAI
-langchain_core_messages.BaseMessage = BaseMessage
-langchain_core_messages.HumanMessage = HumanMessage
-langchain_core_messages.SystemMessage = SystemMessage
-langchain_core_messages.AIMessage = AIMessage
-langchain_core_messages.ToolMessage = ToolMessage
+if not hasattr(langchain_openai, "ChatOpenAI"):
+    langchain_openai.ChatOpenAI = ChatOpenAI
+if not hasattr(langchain_anthropic, "ChatAnthropic"):
+    langchain_anthropic.ChatAnthropic = ChatAnthropic
+if not hasattr(langchain_google_genai, "ChatGoogleGenerativeAI"):
+    langchain_google_genai.ChatGoogleGenerativeAI = ChatGoogleGenerativeAI
+if not hasattr(langchain_core_messages, "BaseMessage"):
+    langchain_core_messages.BaseMessage = BaseMessage
+    langchain_core_messages.HumanMessage = HumanMessage
+    langchain_core_messages.SystemMessage = SystemMessage
+    langchain_core_messages.AIMessage = AIMessage
+    langchain_core_messages.AIMessageChunk = AIMessageChunk
+    langchain_core_messages.ToolMessage = ToolMessage
+    langchain_core_messages.message_chunk_to_message = lambda chunk: chunk
 sys.modules.setdefault("langchain_openai", langchain_openai)
 sys.modules.setdefault("langchain_anthropic", langchain_anthropic)
 sys.modules.setdefault("langchain_google_genai", langchain_google_genai)

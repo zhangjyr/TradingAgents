@@ -1,6 +1,14 @@
 from tradingagents.agents.utils.agent_utils import build_instrument_context, get_language_instruction
 
 
+def _compact_text(text: str, max_chars: int) -> str:
+    if len(text) <= max_chars:
+        return text
+    head = max_chars // 2
+    tail = max_chars - head
+    return text[:head] + "\n\n[...]\n\n" + text[-tail:]
+
+
 def create_portfolio_manager(llm, memory):
     def portfolio_manager_node(state) -> dict:
 
@@ -21,6 +29,13 @@ def create_portfolio_manager(llm, memory):
         for i, rec in enumerate(past_memories, 1):
             past_memory_str += rec["recommendation"] + "\n\n"
 
+        history = _compact_text(history, 7000)
+        market_research_report = _compact_text(market_research_report, 1800)
+        sentiment_report = _compact_text(sentiment_report, 1800)
+        news_report = _compact_text(news_report, 1800)
+        fundamentals_report = _compact_text(fundamentals_report, 2200)
+        trader_plan = _compact_text(trader_plan, 3500)
+
         prompt = f"""As the Portfolio Manager, synthesize the risk analysts' debate and deliver the final trading decision.
 
 {instrument_context}
@@ -37,6 +52,10 @@ def create_portfolio_manager(llm, memory):
 **Context:**
 - Trader's proposed plan: **{trader_plan}**
 - Lessons from past decisions: **{past_memory_str}**
+- Market report excerpt: **{market_research_report}**
+- Sentiment report excerpt: **{sentiment_report}**
+- News report excerpt: **{news_report}**
+- Fundamentals report excerpt: **{fundamentals_report}**
 
 **Required Output Structure:**
 1. **Rating**: State one of Buy / Overweight / Hold / Underweight / Sell.
@@ -51,7 +70,6 @@ def create_portfolio_manager(llm, memory):
 ---
 
 Be decisive and ground every conclusion in specific evidence from the analysts.{get_language_instruction()}"""
-
         response = llm.invoke(prompt)
 
         new_risk_debate_state = {

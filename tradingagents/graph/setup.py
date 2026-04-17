@@ -18,6 +18,8 @@ class GraphSetup:
         self,
         quick_thinking_llm: ChatOpenAI,
         deep_thinking_llm: ChatOpenAI,
+        research_manager_llm: ChatOpenAI | None,
+        portfolio_manager_llm: ChatOpenAI | None,
         tool_nodes: Dict[str, ToolNode],
         bull_memory,
         bear_memory,
@@ -25,10 +27,13 @@ class GraphSetup:
         invest_judge_memory,
         portfolio_manager_memory,
         conditional_logic: ConditionalLogic,
+        checkpointer=None,
     ):
         """Initialize with required components."""
         self.quick_thinking_llm = quick_thinking_llm
         self.deep_thinking_llm = deep_thinking_llm
+        self.research_manager_llm = research_manager_llm
+        self.portfolio_manager_llm = portfolio_manager_llm
         self.tool_nodes = tool_nodes
         self.bull_memory = bull_memory
         self.bear_memory = bear_memory
@@ -36,6 +41,7 @@ class GraphSetup:
         self.invest_judge_memory = invest_judge_memory
         self.portfolio_manager_memory = portfolio_manager_memory
         self.conditional_logic = conditional_logic
+        self.checkpointer = checkpointer
 
     def setup_graph(
         self, selected_analysts=["market", "social", "news", "fundamentals"]
@@ -93,7 +99,7 @@ class GraphSetup:
             self.quick_thinking_llm, self.bear_memory
         )
         research_manager_node = create_research_manager(
-            self.deep_thinking_llm, self.invest_judge_memory
+            (self.research_manager_llm or self.deep_thinking_llm), self.invest_judge_memory
         )
         trader_node = create_trader(self.quick_thinking_llm, self.trader_memory)
 
@@ -102,7 +108,7 @@ class GraphSetup:
         neutral_analyst = create_neutral_debator(self.quick_thinking_llm)
         conservative_analyst = create_conservative_debator(self.quick_thinking_llm)
         portfolio_manager_node = create_portfolio_manager(
-            self.deep_thinking_llm, self.portfolio_manager_memory
+            (self.portfolio_manager_llm or self.deep_thinking_llm), self.portfolio_manager_memory
         )
 
         # Create workflow
@@ -199,4 +205,4 @@ class GraphSetup:
         workflow.add_edge("Portfolio Manager", END)
 
         # Compile and return
-        return workflow.compile()
+        return workflow.compile(checkpointer=self.checkpointer)

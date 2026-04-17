@@ -34,6 +34,7 @@ from tradingagents.agents.utils.agent_utils import (
 )
 
 from .conditional_logic import ConditionalLogic
+from .persistence import PersistentInMemorySaver
 from .setup import GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
@@ -61,6 +62,7 @@ class TradingAgentsGraph:
         self.debug = debug
         self.config = config or DEFAULT_CONFIG
         self.callbacks = callbacks or []
+        self.checkpointer = None
 
         # Update the interface's config
         set_config(self.config)
@@ -93,6 +95,14 @@ class TradingAgentsGraph:
 
         self.deep_thinking_llm = deep_client.get_llm()
         self.quick_thinking_llm = quick_client.get_llm()
+        self.research_manager_llm = self.deep_thinking_llm
+        self.portfolio_manager_llm = self.deep_thinking_llm
+        if (
+            self.config["llm_provider"] == "claude_code"
+            and str(self.config["deep_think_llm"]).lower().startswith("claude-opus")
+        ):
+            self.research_manager_llm = self.quick_thinking_llm
+            self.portfolio_manager_llm = self.quick_thinking_llm
         
         # Initialize memories
         self.bull_memory = FinancialSituationMemory("bull_memory", self.config)
@@ -109,9 +119,14 @@ class TradingAgentsGraph:
             max_debate_rounds=self.config["max_debate_rounds"],
             max_risk_discuss_rounds=self.config["max_risk_discuss_rounds"],
         )
+        checkpoint_path = self.config.get("checkpoint_path")
+        if checkpoint_path:
+            self.checkpointer = PersistentInMemorySaver(checkpoint_path)
         self.graph_setup = GraphSetup(
             self.quick_thinking_llm,
             self.deep_thinking_llm,
+            self.research_manager_llm,
+            self.portfolio_manager_llm,
             self.tool_nodes,
             self.bull_memory,
             self.bear_memory,
@@ -119,6 +134,7 @@ class TradingAgentsGraph:
             self.invest_judge_memory,
             self.portfolio_manager_memory,
             self.conditional_logic,
+            checkpointer=self.checkpointer,
         )
 
         self.propagator = Propagator()
@@ -148,7 +164,7 @@ class TradingAgentsGraph:
             if reasoning_effort:
                 kwargs["reasoning_effort"] = reasoning_effort
 
-        elif provider == "anthropic":
+        elif provider in ("anthropic", "claude_code"):
             effort = self.config.get("anthropic_effort")
             if effort:
                 kwargs["effort"] = effort
