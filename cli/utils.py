@@ -272,13 +272,17 @@ def select_llm_provider() -> tuple[str, str]:
 
 def _report_codex_model_failure(provider: str, mode: str, error: Exception) -> None:
     auth_path = get_codex_auth_path()
+    path_entries = [entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
     details = [
         f"Live Codex model loading failed for provider '{provider}' ({mode}).",
         f"{type(error).__name__}: {error}",
         f"auth path: {auth_path}",
         f"auth exists: {auth_path.exists()}",
         f"codex path: {shutil.which('codex')}",
+        f"node path: {shutil.which('node')}",
+        f"git path: {shutil.which('git')}",
         f"GIT_EXEC_PATH: {os.environ.get('GIT_EXEC_PATH') or '(unset)'}",
+        f"PATH prefix: {path_entries[:8]}",
         "TradingAgents is falling back to the built-in Codex model catalog.",
     ]
     console.print(

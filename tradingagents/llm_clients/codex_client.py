@@ -331,6 +331,8 @@ class CodexAppServerRpcClient:
     ):
         if shutil.which(command) is None:
             raise RuntimeError(f"Codex CLI not found: {command}. Install Codex and run `codex login`.")
+        self._env = dict(env or os.environ.copy())
+        self._stderr_tail: list[str] = []
         self._process = subprocess.Popen(
             [command, *args],
             stdin=subprocess.PIPE,
@@ -340,7 +342,7 @@ class CodexAppServerRpcClient:
             encoding="utf-8",
             bufsize=1,
             cwd=cwd,
-            env=env,
+            env=self._env,
         )
         self._pending: dict[int, queue.Queue] = {}
         self._lock = threading.Lock()
@@ -353,6 +355,18 @@ class CodexAppServerRpcClient:
         self._reader.start()
         self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
         self._stderr_reader.start()
+
+    def _timeout_context(self) -> dict[str, Any]:
+        env_path = self._env.get("PATH", "")
+        stderr_tail = self._stderr_tail[-8:]
+        return {
+            "returncode": self._process.poll(),
+            "node_path": shutil.which("node", path=env_path),
+            "git_path": shutil.which("git", path=env_path),
+            "git_exec_path": self._env.get("GIT_EXEC_PATH"),
+            "stderr_tail": stderr_tail,
+            "path_prefix": env_path.split(os.pathsep)[:8] if env_path else [],
+        }
 
     def initialize(self) -> None:
         self.request(
@@ -390,10 +404,18 @@ class CodexAppServerRpcClient:
             response = response_queue.get(timeout=timeout)
         except queue.Empty as error:
             self._pending.pop(request_id, None)
+            timeout_context = self._timeout_context()
             # #region debug-point B:request-timeout
-            _debug_emit("B", "codex_client.py:request", "rpc request timed out", {"id": request_id, "method": method, "timeout": timeout})
+            _debug_emit("B", "codex_client.py:request", "rpc request timed out", {"id": request_id, "method": method, "timeout": timeout, **timeout_context})
             # #endregion
-            raise RuntimeError(f"Codex app-server request timed out: {method}") from error
+            raise RuntimeError(
+                f"Codex app-server request timed out: {method}; "
+                f"returncode={timeout_context['returncode']}; "
+                f"node={timeout_context['node_path']}; "
+                f"git={timeout_context['git_path']}; "
+                f"GIT_EXEC_PATH={timeout_context['git_exec_path']}; "
+                f"stderr_tail={timeout_context['stderr_tail']}"
+            ) from error
         if "error" in response:
             message = response["error"].get("message", f"{method} failed")
             # #region debug-point C:request-error
@@ -490,6 +512,9 @@ class CodexAppServerRpcClient:
             if self._on_stderr is not None:
                 text = line.strip()
                 if text:
+                    self._stderr_tail.append(text)
+                    if len(self._stderr_tail) > 20:
+                        self._stderr_tail = self._stderr_tail[-20:]
                     self._on_stderr(text)
                     # #region debug-point C:stderr-line
                     _debug_emit("C", "codex_client.py:_read_stderr", "stderr line received", {"text": text[:500]})
