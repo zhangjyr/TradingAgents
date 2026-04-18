@@ -25,7 +25,7 @@ from rich.align import Align
 from rich.rule import Rule
 
 from tradingagents.graph.trading_graph import TradingAgentsGraph
-from tradingagents.llm_clients.codex_client import get_codex_auth_path, has_codex_auth
+from tradingagents.llm_clients.codex_client import can_use_codex, get_codex_auth_path
 from tradingagents.default_config import DEFAULT_CONFIG
 from cli.models import AnalystType
 from cli.utils import *
