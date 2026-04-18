@@ -118,6 +118,19 @@ Install the package and its dependencies:
 pip install .
 ```
 
+### Docker
+
+Alternatively, run with Docker:
+```bash
+cp .env.example .env  # add your API keys
+docker compose run --rm tradingagents
+```
+
+For local models with Ollama:
+```bash
+docker compose --profile ollama run --rm tradingagents-ollama
+```
+
 ### Required APIs
 
 TradingAgents supports multiple LLM providers. Set the API key for your chosen provider:
@@ -128,9 +141,14 @@ export GOOGLE_API_KEY=...          # Google (Gemini)
 export ANTHROPIC_API_KEY=...       # Anthropic (Claude)
 export CLAUDE_CODE_OAUTH_TOKEN=... # Optional override for Claude Code subscription auth
 export XAI_API_KEY=...             # xAI (Grok)
+export DEEPSEEK_API_KEY=...        # DeepSeek
+export DASHSCOPE_API_KEY=...       # Qwen (Alibaba DashScope)
+export ZHIPU_API_KEY=...           # GLM (Zhipu)
 export OPENROUTER_API_KEY=...      # OpenRouter
 export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
 ```
+
+For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
 
 For local models, configure Ollama with `llm_provider: "ollama"` in your config.
 

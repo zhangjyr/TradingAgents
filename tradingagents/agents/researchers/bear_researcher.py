@@ -1,6 +1,3 @@
-from langchain_core.messages import AIMessage
-
-
 def _compact_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
