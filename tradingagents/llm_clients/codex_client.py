@@ -143,6 +143,41 @@ def can_use_codex(cwd: Optional[str] = None) -> bool:
         return False
 
 
+def build_codex_subprocess_env(codex_command: str) -> dict[str, str]:
+    env = os.environ.copy()
+    path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
+    codex_path = shutil.which(codex_command)
+    if codex_path:
+        codex_dir = str(Path(codex_path).resolve().parent)
+        if codex_dir not in path_entries:
+            path_entries.insert(0, codex_dir)
+    git_exec_path = env.get("GIT_EXEC_PATH")
+    if not git_exec_path:
+        try:
+            git_exec_path = subprocess.check_output(
+                ["git", "--exec-path"],
+                text=True,
+            ).strip()
+        except Exception:
+            git_exec_path = ""
+    if git_exec_path:
+        env["GIT_EXEC_PATH"] = git_exec_path
+        if git_exec_path not in path_entries:
+            path_entries.insert(0, git_exec_path)
+    if path_entries:
+        env["PATH"] = os.pathsep.join(path_entries)
+    _model_loading_debug_emit(
+        "prepared codex subprocess environment",
+        {
+            "codex_command": codex_command,
+            "codex_path": codex_path,
+            "git_exec_path": git_exec_path or None,
+            "path_prefix": path_entries[:6],
+        },
+    )
+    return env
+
+
 def _extract_text(value: Any) -> str:
     if value is None:
         return ""
@@ -592,6 +627,7 @@ class CodexChatModel:
                 command=self.codex_command,
                 args=self.codex_args,
                 cwd=self.cwd,
+                env=build_codex_subprocess_env(self.codex_command),
                 on_stderr=lambda text: self._emit_codex_event({"type": "stderr", "text": text}),
             )
             self._rpc.initialize()

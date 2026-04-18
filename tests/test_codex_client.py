@@ -58,7 +58,12 @@ sys.modules.setdefault("langchain_anthropic", langchain_anthropic)
 sys.modules.setdefault("langchain_google_genai", langchain_google_genai)
 sys.modules.setdefault("langchain_core.messages", langchain_core_messages)
 
-from tradingagents.llm_clients.codex_client import CodexChatModel, CodexClient, can_use_codex
+from tradingagents.llm_clients.codex_client import (
+    CodexChatModel,
+    CodexClient,
+    build_codex_subprocess_env,
+    can_use_codex,
+)
 
 
 class FakeRpcClient:
@@ -152,6 +157,26 @@ class TestableCodexChatModel(CodexChatModel):
 
 
 class TestCodexClient(unittest.TestCase):
+    def test_build_codex_subprocess_env_adds_codex_and_git_exec_path(self):
+        with unittest.mock.patch.dict(
+            "os.environ",
+            {"PATH": "/usr/bin:/bin"},
+            clear=True,
+        ), unittest.mock.patch(
+            "tradingagents.llm_clients.codex_client.shutil.which",
+            return_value="/opt/codex/bin/codex",
+        ), unittest.mock.patch(
+            "tradingagents.llm_clients.codex_client.subprocess.check_output",
+            return_value="/opt/git/libexec/git-core\n",
+        ):
+            env = build_codex_subprocess_env("codex")
+
+        self.assertEqual(env["GIT_EXEC_PATH"], "/opt/git/libexec/git-core")
+        self.assertEqual(
+            env["PATH"].split(":")[:4],
+            ["/opt/git/libexec/git-core", "/opt/codex/bin", "/usr/bin", "/bin"],
+        )
+
     def test_can_use_codex_returns_true_when_auth_file_exists(self):
         with unittest.mock.patch(
             "tradingagents.llm_clients.codex_client.has_codex_auth",
