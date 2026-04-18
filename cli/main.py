@@ -629,15 +629,19 @@ def get_user_selections():
     provider_lower = selected_llm_provider.lower()
     if provider_lower in ("codex", "openai_codex_oauth"):
         codex_auth_path = get_codex_auth_path()
-        if not has_codex_auth():
+        if not can_use_codex():
+            hint = (
+                f"TradingAgents looked for a Codex credential at {codex_auth_path}, "
+                "then tried live Codex model discovery and still could not access Codex."
+            )
             console.print(
                 create_question_box(
                     "Step 6b: Codex Login Required",
-                    f"Run `codex login` first so TradingAgents can reuse the Codex credential at {codex_auth_path}"
+                    hint
                 )
             )
             console.print(
-                f"\n[red]No Codex credential found at {codex_auth_path}. Run `codex login` and try again.[/red]"
+                f"\n[red]Codex is not accessible. Run `codex login`, verify the `codex` CLI works on this machine, and try again.[/red]"
             )
             exit(1)
     elif provider_lower == "claude_code":

@@ -83,7 +83,7 @@ sys.modules.setdefault("langchain_anthropic", langchain_anthropic)
 sys.modules.setdefault("langchain_google_genai", langchain_google_genai)
 sys.modules.setdefault("langchain_core.messages", langchain_core_messages)
 
-from tradingagents.llm_clients.codex_client import CodexChatModel, CodexClient
+from tradingagents.llm_clients.codex_client import CodexChatModel, CodexClient, can_use_codex
 
 
 class FakeRpcClient:
@@ -177,6 +177,36 @@ class TestableCodexChatModel(CodexChatModel):
 
 
 class TestCodexClient(unittest.TestCase):
+    def test_can_use_codex_returns_true_when_auth_file_exists(self):
+        with unittest.mock.patch(
+            "tradingagents.llm_clients.codex_client.has_codex_auth",
+            return_value=True,
+        ), unittest.mock.patch(
+            "tradingagents.llm_clients.codex_client.list_codex_models"
+        ) as mock_list:
+            self.assertTrue(can_use_codex())
+        mock_list.assert_not_called()
+
+    def test_can_use_codex_probes_models_when_auth_file_missing(self):
+        with unittest.mock.patch(
+            "tradingagents.llm_clients.codex_client.has_codex_auth",
+            return_value=False,
+        ), unittest.mock.patch(
+            "tradingagents.llm_clients.codex_client.list_codex_models",
+            return_value=["gpt-5.4"],
+        ):
+            self.assertTrue(can_use_codex())
+
+    def test_can_use_codex_returns_false_when_probe_fails(self):
+        with unittest.mock.patch(
+            "tradingagents.llm_clients.codex_client.has_codex_auth",
+            return_value=False,
+        ), unittest.mock.patch(
+            "tradingagents.llm_clients.codex_client.list_codex_models",
+            side_effect=RuntimeError("codex unavailable"),
+        ):
+            self.assertFalse(can_use_codex())
+
     def test_codex_provider_validates_codex_models(self):
         client = CodexClient("gpt-5.3-codex")
         self.assertTrue(client.validate_model())
