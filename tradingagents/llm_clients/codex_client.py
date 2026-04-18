@@ -61,15 +61,86 @@ def _debug_emit(hypothesis_id: str, location: str, msg: str, data: Optional[dict
 # #endregion
 
 
+#region debug-point codex-model-loading
+def _model_loading_debug_emit(msg: str, data: Optional[dict[str, Any]] = None) -> None:
+    env_path = Path(".dbg/codex-model-loading.env")
+    debug_url = "http://127.0.0.1:7777/event"
+    session_id = "codex-model-loading"
+    try:
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if line.startswith("DEBUG_SERVER_URL="):
+                    debug_url = line.split("=", 1)[1].strip() or debug_url
+                elif line.startswith("DEBUG_SESSION_ID="):
+                    session_id = line.split("=", 1)[1].strip() or session_id
+        payload = {
+            "sessionId": session_id,
+            "runId": "pre-fix",
+            "hypothesisId": "A",
+            "location": "codex_client.py",
+            "msg": f"[DEBUG] {msg}",
+            "data": data or {},
+            "ts": int(time.time() * 1000),
+        }
+        request = urllib.request.Request(
+            debug_url,
+            data=json.dumps(payload, default=str).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(request, timeout=1).read()
+    except Exception:
+        pass
+#endregion
+
+
 def get_codex_auth_path() -> Path:
     codex_home = os.environ.get("CODEX_HOME")
     if codex_home:
-        return Path(codex_home).expanduser() / "auth.json"
-    return Path.home() / ".codex" / "auth.json"
+        auth_path = Path(codex_home).expanduser() / "auth.json"
+        _model_loading_debug_emit(
+            "resolved codex auth path from CODEX_HOME",
+            {"codex_home": codex_home, "auth_path": str(auth_path)},
+        )
+        return auth_path
+    auth_path = Path.home() / ".codex" / "auth.json"
+    _model_loading_debug_emit(
+        "resolved codex auth path from home directory",
+        {"auth_path": str(auth_path)},
+    )
+    return auth_path
 
 
 def has_codex_auth() -> bool:
-    return get_codex_auth_path().exists()
+    auth_path = get_codex_auth_path()
+    exists = auth_path.exists()
+    _model_loading_debug_emit(
+        "checked codex auth existence",
+        {"auth_path": str(auth_path), "exists": exists},
+    )
+    return exists
+
+
+def can_use_codex(cwd: Optional[str] = None) -> bool:
+    if has_codex_auth():
+        _model_loading_debug_emit(
+            "codex available via auth file",
+            {"cwd": cwd},
+        )
+        return True
+    try:
+        models = list_codex_models(cwd=cwd)
+        available = len(models) > 0
+        _model_loading_debug_emit(
+            "codex availability probe via model listing",
+            {"cwd": cwd, "available": available, "models": models},
+        )
+        return available
+    except Exception as error:
+        _model_loading_debug_emit(
+            "codex availability probe failed",
+            {"cwd": cwd, "error_type": type(error).__name__, "error": str(error)},
+        )
+        return False
 
 
 def _extract_text(value: Any) -> str:
@@ -725,6 +796,15 @@ def list_codex_models(
     codex_args: tuple[str, ...] = DEFAULT_CODEX_ARGS,
     cwd: Optional[str] = None,
 ) -> list[str]:
+    _model_loading_debug_emit(
+        "starting codex model listing",
+        {
+            "codex_command": codex_command,
+            "codex_args": list(codex_args),
+            "cwd": cwd,
+            "which_codex": shutil.which(codex_command),
+        },
+    )
     model = CodexChatModel(
         model="gpt-5.4",
         cwd=cwd,
@@ -732,7 +812,18 @@ def list_codex_models(
         codex_args=codex_args,
     )
     try:
-        return model.list_models()
+        models = model.list_models()
+        _model_loading_debug_emit(
+            "codex model listing succeeded",
+            {"models": models},
+        )
+        return models
+    except Exception as error:
+        _model_loading_debug_emit(
+            "codex model listing failed",
+            {"error_type": type(error).__name__, "error": str(error)},
+        )
+        raise
     finally:
         model.close()
 

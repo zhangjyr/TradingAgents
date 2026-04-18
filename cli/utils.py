@@ -1,5 +1,9 @@
 import questionary
 from typing import List, Tuple
+import json
+import time
+import urllib.request
+from pathlib import Path
 
 from rich.console import Console
 
@@ -8,6 +12,38 @@ from tradingagents.llm_clients.codex_client import list_codex_models
 from tradingagents.llm_clients.model_catalog import get_model_options
 
 console = Console()
+
+
+#region debug-point codex-model-loading
+def _debug_emit(msg: str, data: dict | None = None) -> None:
+    env_path = Path(".dbg/codex-model-loading.env")
+    debug_url = "http://127.0.0.1:7777/event"
+    session_id = "codex-model-loading"
+    try:
+        if env_path.exists():
+            for line in env_path.read_text().splitlines():
+                if line.startswith("DEBUG_SERVER_URL="):
+                    debug_url = line.split("=", 1)[1].strip() or debug_url
+                elif line.startswith("DEBUG_SESSION_ID="):
+                    session_id = line.split("=", 1)[1].strip() or session_id
+        payload = {
+            "sessionId": session_id,
+            "runId": "pre-fix",
+            "hypothesisId": "B",
+            "location": "cli/utils.py:_resolve_model_options",
+            "msg": f"[DEBUG] {msg}",
+            "data": data or {},
+            "ts": int(time.time() * 1000),
+        }
+        request = urllib.request.Request(
+            debug_url,
+            data=json.dumps(payload, default=str).encode(),
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(request, timeout=1).read()
+    except Exception:
+        pass
+#endregion
 
 TICKER_INPUT_EXAMPLES = "Examples: SPY, CNC.TO, 7203.T, 0700.HK"
 
@@ -232,12 +268,29 @@ def select_llm_provider() -> tuple[str, str]:
 def _resolve_model_options(provider: str, mode: str) -> List[Tuple[str, str]]:
     if provider.lower() in ("codex", "openai_codex_oauth"):
         try:
+            _debug_emit(
+                "attempting codex model discovery",
+                {"provider": provider, "mode": mode},
+            )
             models = list_codex_models()
             if models:
+                _debug_emit(
+                    "codex model discovery succeeded",
+                    {"provider": provider, "mode": mode, "models": models},
+                )
                 return [(model, model) for model in models]
         except Exception:
+            _debug_emit(
+                "codex model discovery failed; falling back to static catalog",
+                {"provider": provider, "mode": mode},
+            )
             pass
-    return get_model_options(provider, mode)
+    choices = get_model_options(provider, mode)
+    _debug_emit(
+        "resolved model options from static catalog",
+        {"provider": provider, "mode": mode, "choices": [value for _, value in choices]},
+    )
+    return choices
 
 
 def ask_openai_reasoning_effort() -> str:
