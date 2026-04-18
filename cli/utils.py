@@ -1,17 +1,22 @@
 import questionary
 from typing import List, Tuple
 import json
+import os
+import shutil
 import time
 import urllib.request
 from pathlib import Path
 
 from rich.console import Console
+from rich.panel import Panel
 
 from cli.models import AnalystType
-from tradingagents.llm_clients.codex_client import list_codex_models
+from tradingagents.llm_clients.codex_client import get_codex_auth_path, list_codex_models
 from tradingagents.llm_clients.model_catalog import get_model_options
 
 console = Console()
+_CODEX_DISCOVERY_CACHE: dict[str, list[str]] = {}
+_CODEX_DISCOVERY_FAILURES: set[str] = set()
 
 
 #region debug-point codex-model-loading
@@ -266,8 +271,43 @@ def select_llm_provider() -> tuple[str, str]:
     return display_name, url
 
 
+def _report_codex_model_failure(provider: str, mode: str, error: Exception) -> None:
+    auth_path = get_codex_auth_path()
+    path_entries = [entry for entry in os.environ.get("PATH", "").split(os.pathsep) if entry]
+    details = [
+        f"Live Codex model loading failed for provider '{provider}' ({mode}).",
+        f"{type(error).__name__}: {error}",
+        f"auth path: {auth_path}",
+        f"auth exists: {auth_path.exists()}",
+        f"codex path: {shutil.which('codex')}",
+        f"node path: {shutil.which('node')}",
+        f"git path: {shutil.which('git')}",
+        f"GIT_EXEC_PATH: {os.environ.get('GIT_EXEC_PATH') or '(unset)'}",
+        f"PATH prefix: {path_entries[:8]}",
+        "TradingAgents is falling back to the built-in Codex model catalog.",
+    ]
+    console.print(
+        Panel(
+            "\n".join(details),
+            title="Codex Model Loading Fallback",
+            border_style="yellow",
+        )
+    )
+
+
 def _resolve_model_options(provider: str, mode: str) -> List[Tuple[str, str]]:
-    if provider.lower() in ("codex", "openai_codex_oauth"):
+    provider_lower = provider.lower()
+    if provider_lower in ("codex", "openai_codex_oauth"):
+        cached_models = _CODEX_DISCOVERY_CACHE.get(provider_lower)
+        if cached_models is not None:
+            return [(model, model) for model in cached_models]
+        if provider_lower in _CODEX_DISCOVERY_FAILURES:
+            choices = get_model_options(provider, mode)
+            _debug_emit(
+                "resolved model options from cached static catalog",
+                {"provider": provider, "mode": mode, "choices": [value for _, value in choices]},
+            )
+            return choices
         try:
             _debug_emit(
                 "attempting codex model discovery",
@@ -275,17 +315,24 @@ def _resolve_model_options(provider: str, mode: str) -> List[Tuple[str, str]]:
             )
             models = list_codex_models()
             if models:
+                _CODEX_DISCOVERY_CACHE[provider_lower] = models
                 _debug_emit(
                     "codex model discovery succeeded",
                     {"provider": provider, "mode": mode, "models": models},
                 )
                 return [(model, model) for model in models]
-        except Exception:
+        except Exception as error:
+            _CODEX_DISCOVERY_FAILURES.add(provider_lower)
             _debug_emit(
                 "codex model discovery failed; falling back to static catalog",
-                {"provider": provider, "mode": mode},
+                {
+                    "provider": provider,
+                    "mode": mode,
+                    "error_type": type(error).__name__,
+                    "error": str(error),
+                },
             )
-            pass
+            _report_codex_model_failure(provider, mode, error)
     choices = get_model_options(provider, mode)
     _debug_emit(
         "resolved model options from static catalog",

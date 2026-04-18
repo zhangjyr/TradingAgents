@@ -143,6 +143,41 @@ def can_use_codex(cwd: Optional[str] = None) -> bool:
         return False
 
 
+def build_codex_subprocess_env(codex_command: str) -> dict[str, str]:
+    env = os.environ.copy()
+    path_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
+    codex_path = shutil.which(codex_command)
+    if codex_path:
+        codex_dir = str(Path(codex_path).resolve().parent)
+        if codex_dir not in path_entries:
+            path_entries.insert(0, codex_dir)
+    git_exec_path = env.get("GIT_EXEC_PATH")
+    if not git_exec_path:
+        try:
+            git_exec_path = subprocess.check_output(
+                ["git", "--exec-path"],
+                text=True,
+            ).strip()
+        except Exception:
+            git_exec_path = ""
+    if git_exec_path:
+        env["GIT_EXEC_PATH"] = git_exec_path
+        if git_exec_path not in path_entries:
+            path_entries.insert(0, git_exec_path)
+    if path_entries:
+        env["PATH"] = os.pathsep.join(path_entries)
+    _model_loading_debug_emit(
+        "prepared codex subprocess environment",
+        {
+            "codex_command": codex_command,
+            "codex_path": codex_path,
+            "git_exec_path": git_exec_path or None,
+            "path_prefix": path_entries[:6],
+        },
+    )
+    return env
+
+
 def _extract_text(value: Any) -> str:
     if value is None:
         return ""
@@ -296,6 +331,8 @@ class CodexAppServerRpcClient:
     ):
         if shutil.which(command) is None:
             raise RuntimeError(f"Codex CLI not found: {command}. Install Codex and run `codex login`.")
+        self._env = dict(env or os.environ.copy())
+        self._stderr_tail: list[str] = []
         self._process = subprocess.Popen(
             [command, *args],
             stdin=subprocess.PIPE,
@@ -305,7 +342,7 @@ class CodexAppServerRpcClient:
             encoding="utf-8",
             bufsize=1,
             cwd=cwd,
-            env=env,
+            env=self._env,
         )
         self._pending: dict[int, queue.Queue] = {}
         self._lock = threading.Lock()
@@ -318,6 +355,38 @@ class CodexAppServerRpcClient:
         self._reader.start()
         self._stderr_reader = threading.Thread(target=self._read_stderr, daemon=True)
         self._stderr_reader.start()
+
+    def _timeout_context(self) -> dict[str, Any]:
+        env_path = self._env.get("PATH", "")
+        stderr_tail = self._stderr_tail[-8:]
+        return {
+            "returncode": self._process.poll(),
+            "node_path": shutil.which("node", path=env_path),
+            "git_path": shutil.which("git", path=env_path),
+            "git_exec_path": self._env.get("GIT_EXEC_PATH"),
+            "stderr_tail": stderr_tail,
+            "path_prefix": env_path.split(os.pathsep)[:8] if env_path else [],
+        }
+
+    def _build_process_exit_error(self, method: str) -> RuntimeError:
+        timeout_context = self._timeout_context()
+        stderr_text = " ".join(timeout_context["stderr_tail"])
+        if "Missing optional dependency" in stderr_text:
+            return RuntimeError(
+                f"Codex app-server exited before responding to {method}; "
+                f"returncode={timeout_context['returncode']}; "
+                "Codex installation is missing an optional platform dependency. "
+                "Reinstall Codex with `npm install -g @openai/codex@latest`; "
+                f"stderr_tail={timeout_context['stderr_tail']}"
+            )
+        return RuntimeError(
+            f"Codex app-server exited before responding to {method}; "
+            f"returncode={timeout_context['returncode']}; "
+            f"node={timeout_context['node_path']}; "
+            f"git={timeout_context['git_path']}; "
+            f"GIT_EXEC_PATH={timeout_context['git_exec_path']}; "
+            f"stderr_tail={timeout_context['stderr_tail']}"
+        )
 
     def initialize(self) -> None:
         self.request(
@@ -351,14 +420,37 @@ class CodexAppServerRpcClient:
         # #region debug-point A:request-sent
         _debug_emit("A", "codex_client.py:request", "rpc request sent", {"id": request_id, "method": method})
         # #endregion
-        try:
-            response = response_queue.get(timeout=timeout)
-        except queue.Empty as error:
-            self._pending.pop(request_id, None)
-            # #region debug-point B:request-timeout
-            _debug_emit("B", "codex_client.py:request", "rpc request timed out", {"id": request_id, "method": method, "timeout": timeout})
-            # #endregion
-            raise RuntimeError(f"Codex app-server request timed out: {method}") from error
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                self._pending.pop(request_id, None)
+                timeout_context = self._timeout_context()
+                # #region debug-point B:request-timeout
+                _debug_emit("B", "codex_client.py:request", "rpc request timed out", {"id": request_id, "method": method, "timeout": timeout, **timeout_context})
+                # #endregion
+                raise RuntimeError(
+                    f"Codex app-server request timed out: {method}; "
+                    f"returncode={timeout_context['returncode']}; "
+                    f"node={timeout_context['node_path']}; "
+                    f"git={timeout_context['git_path']}; "
+                    f"GIT_EXEC_PATH={timeout_context['git_exec_path']}; "
+                    f"stderr_tail={timeout_context['stderr_tail']}"
+                )
+            try:
+                response = response_queue.get(timeout=min(0.25, remaining))
+                break
+            except queue.Empty:
+                if self._process.poll() is not None:
+                    self._pending.pop(request_id, None)
+                    process_error = self._build_process_exit_error(method)
+                    _debug_emit(
+                        "C",
+                        "codex_client.py:request",
+                        "codex process exited before rpc response",
+                        {"id": request_id, "method": method, "error": str(process_error)},
+                    )
+                    raise process_error
         if "error" in response:
             message = response["error"].get("message", f"{method} failed")
             # #region debug-point C:request-error
@@ -455,6 +547,9 @@ class CodexAppServerRpcClient:
             if self._on_stderr is not None:
                 text = line.strip()
                 if text:
+                    self._stderr_tail.append(text)
+                    if len(self._stderr_tail) > 20:
+                        self._stderr_tail = self._stderr_tail[-20:]
                     self._on_stderr(text)
                     # #region debug-point C:stderr-line
                     _debug_emit("C", "codex_client.py:_read_stderr", "stderr line received", {"text": text[:500]})
@@ -592,6 +687,7 @@ class CodexChatModel:
                 command=self.codex_command,
                 args=self.codex_args,
                 cwd=self.cwd,
+                env=build_codex_subprocess_env(self.codex_command),
                 on_stderr=lambda text: self._emit_codex_event({"type": "stderr", "text": text}),
             )
             self._rpc.initialize()
