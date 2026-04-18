@@ -368,6 +368,26 @@ class CodexAppServerRpcClient:
             "path_prefix": env_path.split(os.pathsep)[:8] if env_path else [],
         }
 
+    def _build_process_exit_error(self, method: str) -> RuntimeError:
+        timeout_context = self._timeout_context()
+        stderr_text = " ".join(timeout_context["stderr_tail"])
+        if "Missing optional dependency" in stderr_text:
+            return RuntimeError(
+                f"Codex app-server exited before responding to {method}; "
+                f"returncode={timeout_context['returncode']}; "
+                "Codex installation is missing an optional platform dependency. "
+                "Reinstall Codex with `npm install -g @openai/codex@latest`; "
+                f"stderr_tail={timeout_context['stderr_tail']}"
+            )
+        return RuntimeError(
+            f"Codex app-server exited before responding to {method}; "
+            f"returncode={timeout_context['returncode']}; "
+            f"node={timeout_context['node_path']}; "
+            f"git={timeout_context['git_path']}; "
+            f"GIT_EXEC_PATH={timeout_context['git_exec_path']}; "
+            f"stderr_tail={timeout_context['stderr_tail']}"
+        )
+
     def initialize(self) -> None:
         self.request(
             "initialize",
@@ -400,22 +420,37 @@ class CodexAppServerRpcClient:
         # #region debug-point A:request-sent
         _debug_emit("A", "codex_client.py:request", "rpc request sent", {"id": request_id, "method": method})
         # #endregion
-        try:
-            response = response_queue.get(timeout=timeout)
-        except queue.Empty as error:
-            self._pending.pop(request_id, None)
-            timeout_context = self._timeout_context()
-            # #region debug-point B:request-timeout
-            _debug_emit("B", "codex_client.py:request", "rpc request timed out", {"id": request_id, "method": method, "timeout": timeout, **timeout_context})
-            # #endregion
-            raise RuntimeError(
-                f"Codex app-server request timed out: {method}; "
-                f"returncode={timeout_context['returncode']}; "
-                f"node={timeout_context['node_path']}; "
-                f"git={timeout_context['git_path']}; "
-                f"GIT_EXEC_PATH={timeout_context['git_exec_path']}; "
-                f"stderr_tail={timeout_context['stderr_tail']}"
-            ) from error
+        deadline = time.time() + timeout
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                self._pending.pop(request_id, None)
+                timeout_context = self._timeout_context()
+                # #region debug-point B:request-timeout
+                _debug_emit("B", "codex_client.py:request", "rpc request timed out", {"id": request_id, "method": method, "timeout": timeout, **timeout_context})
+                # #endregion
+                raise RuntimeError(
+                    f"Codex app-server request timed out: {method}; "
+                    f"returncode={timeout_context['returncode']}; "
+                    f"node={timeout_context['node_path']}; "
+                    f"git={timeout_context['git_path']}; "
+                    f"GIT_EXEC_PATH={timeout_context['git_exec_path']}; "
+                    f"stderr_tail={timeout_context['stderr_tail']}"
+                )
+            try:
+                response = response_queue.get(timeout=min(0.25, remaining))
+                break
+            except queue.Empty:
+                if self._process.poll() is not None:
+                    self._pending.pop(request_id, None)
+                    process_error = self._build_process_exit_error(method)
+                    _debug_emit(
+                        "C",
+                        "codex_client.py:request",
+                        "codex process exited before rpc response",
+                        {"id": request_id, "method": method, "error": str(process_error)},
+                    )
+                    raise process_error
         if "error" in response:
             message = response["error"].get("message", f"{method} failed")
             # #region debug-point C:request-error

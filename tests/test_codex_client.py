@@ -1,4 +1,5 @@
 import sys
+import threading
 import types
 import unittest
 
@@ -59,6 +60,7 @@ sys.modules.setdefault("langchain_google_genai", langchain_google_genai)
 sys.modules.setdefault("langchain_core.messages", langchain_core_messages)
 
 from tradingagents.llm_clients.codex_client import (
+    CodexAppServerRpcClient,
     CodexChatModel,
     CodexClient,
     build_codex_subprocess_env,
@@ -210,6 +212,31 @@ class TestCodexClient(unittest.TestCase):
     def test_codex_provider_validates_codex_models(self):
         client = CodexClient("gpt-5.3-codex")
         self.assertTrue(client.validate_model())
+
+    def test_request_fails_fast_when_codex_process_exits_with_missing_dependency(self):
+        class ExitedProcess:
+            def poll(self):
+                return 1
+
+        client = object.__new__(CodexAppServerRpcClient)
+        client._lock = threading.Lock()
+        client._pending = {}
+        client._next_id = 1
+        client._process = ExitedProcess()
+        client._env = {
+            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            "GIT_EXEC_PATH": "/tmp/git-core",
+        }
+        client._stderr_tail = [
+            "Error: Missing optional dependency @openai/codex-darwin-x64. Reinstall Codex: npm install -g @openai/codex@latest",
+        ]
+        client._write = lambda message: None
+
+        with self.assertRaises(RuntimeError) as context:
+            client.request("initialize", timeout=0.01)
+
+        self.assertIn("exited before responding to initialize", str(context.exception))
+        self.assertIn("Reinstall Codex", str(context.exception))
 
     def test_list_models_reads_app_server_catalog(self):
         model = TestableCodexChatModel("gpt-5.4", FakeRpcClient())
