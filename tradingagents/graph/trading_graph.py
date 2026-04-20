@@ -40,6 +40,22 @@ from .propagation import Propagator
 from .reflection import Reflector
 from .signal_processing import SignalProcessor
 
+# PlaceHolder, reserved for extension.
+def should_print_debug_message(message: Any) -> bool:
+    return True
+
+
+def _debug_message_key(message: Any) -> tuple[str, str, str]:
+    message_type = getattr(message, "type", "")
+    message_id = getattr(message, "id", None)
+    if isinstance(message_id, str) and message_id.strip():
+        return (message_type, message_id.strip(), "")
+
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return (message_type, "", content.strip())
+    return (message_type, "", str(content).strip())
+
 
 class RateLimitFallbackLLM:
     def __init__(self, primary_llm, fallback_llm):
@@ -184,6 +200,22 @@ class TradingAgentsGraph:
         # Set up the graph
         self.graph = self.graph_setup.setup_graph(selected_analysts)
 
+    def _reset_reusable_model_threads(self) -> None:
+        seen = set()
+        for model in (
+            self.deep_thinking_llm,
+            self.quick_thinking_llm,
+            self.research_manager_llm,
+            self.portfolio_manager_llm,
+        ):
+            model_identity = id(model)
+            if model_identity in seen:
+                continue
+            seen.add(model_identity)
+            reset_thread = getattr(model, "reset_thread", None)
+            if callable(reset_thread):
+                reset_thread()
+
     def _get_provider_kwargs(self) -> Dict[str, Any]:
         """Get provider-specific kwargs for LLM client creation."""
         kwargs = {"cwd": self.config.get("project_dir")}
@@ -198,6 +230,8 @@ class TradingAgentsGraph:
             reasoning_effort = self.config.get("openai_reasoning_effort")
             if reasoning_effort:
                 kwargs["reasoning_effort"] = reasoning_effort
+            if provider in ("codex", "openai_codex_oauth") and self.config.get("codex_reuse_thread"):
+                kwargs["reuse_thread"] = True
 
         elif provider in ("anthropic", "claude_code"):
             effort = self.config.get("anthropic_effort")
@@ -246,6 +280,7 @@ class TradingAgentsGraph:
         """Run the trading agents graph for a company on a specific date."""
 
         self.ticker = company_name
+        self._reset_reusable_model_threads()
 
         # Initialize state
         init_agent_state = self.propagator.create_initial_state(
@@ -256,11 +291,16 @@ class TradingAgentsGraph:
         if self.debug:
             # Debug mode with tracing
             trace = []
+            last_printed_key = None
             for chunk in self.graph.stream(init_agent_state, **args):
                 if len(chunk["messages"]) == 0:
                     pass
                 else:
-                    chunk["messages"][-1].pretty_print()
+                    last_message = chunk["messages"][-1]
+                    current_key = _debug_message_key(last_message)
+                    if should_print_debug_message(last_message) and current_key != last_printed_key:
+                        last_message.pretty_print()
+                        last_printed_key = current_key
                     trace.append(chunk)
 
             final_state = trace[-1]

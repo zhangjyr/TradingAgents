@@ -2,6 +2,8 @@ import sys
 import threading
 import types
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 try:
     import langchain_openai  # type: ignore
@@ -88,6 +90,9 @@ from tradingagents.llm_clients.codex_client import (
     CodexAppServerRpcClient,
     CodexChatModel,
     CodexClient,
+    _debug_emit,
+    _model_loading_debug_emit,
+    _resolve_debug_target,
     build_codex_subprocess_env,
     can_use_codex,
 )
@@ -97,6 +102,7 @@ class FakeRpcClient:
     def __init__(self):
         self.request_handler = None
         self.tool_call_result = None
+        self.thread_start_calls = 0
         self.notifications = [
             {
                 "method": "item/reasoning/textDelta",
@@ -131,6 +137,7 @@ class FakeRpcClient:
 
     def request(self, method, params=None, timeout=60.0):
         if method == "thread/start":
+            self.thread_start_calls += 1
             return {"thread": {"id": "thread-1"}}
         if method == "turn/start":
             if self.request_handler is not None:
@@ -175,8 +182,8 @@ class FakeTool:
 
 
 class TestableCodexChatModel(CodexChatModel):
-    def __init__(self, model, rpc_client, callbacks=None):
-        super().__init__(model=model, cwd="/tmp", callbacks=callbacks)
+    def __init__(self, model, rpc_client, callbacks=None, reuse_thread=False):
+        super().__init__(model=model, cwd="/tmp", callbacks=callbacks, reuse_thread=reuse_thread)
         self._rpc = rpc_client
 
     def _get_rpc(self):
@@ -233,6 +240,83 @@ class TestCodexClient(unittest.TestCase):
             side_effect=RuntimeError("codex unavailable"),
         ):
             self.assertFalse(can_use_codex())
+
+    def test_debug_emit_skips_network_when_debug_env_missing(self):
+        _resolve_debug_target.cache_clear()
+        with patch("tradingagents.llm_clients.codex_client.Path.exists", return_value=False), patch(
+            "tradingagents.llm_clients.codex_client.urllib.request.urlopen"
+        ) as mock_urlopen:
+            _debug_emit("A", "codex_client.py:test", "skip network")
+        mock_urlopen.assert_not_called()
+
+    def test_model_loading_debug_emit_skips_network_when_debug_env_missing(self):
+        _resolve_debug_target.cache_clear()
+        with patch("tradingagents.llm_clients.codex_client.Path.exists", return_value=False), patch(
+            "tradingagents.llm_clients.codex_client.urllib.request.urlopen"
+        ) as mock_urlopen:
+            _model_loading_debug_emit("skip network")
+        mock_urlopen.assert_not_called()
+
+    def test_debug_target_is_cached_when_env_exists(self):
+        debug_dir = Path(".dbg")
+        debug_dir.mkdir(exist_ok=True)
+        env_path = debug_dir / "codex-notification-timeout.env"
+        env_path.write_text(
+            "DEBUG_SERVER_URL=http://127.0.0.1:9999/event\nDEBUG_SESSION_ID=test-session\n",
+            encoding="utf-8",
+        )
+        self.addCleanup(lambda: env_path.unlink(missing_ok=True))
+        _resolve_debug_target.cache_clear()
+        first = _resolve_debug_target("codex-notification-timeout.env", "codex-notification-timeout")
+        second = _resolve_debug_target("codex-notification-timeout.env", "codex-notification-timeout")
+        self.assertEqual(first, ("http://127.0.0.1:9999/event", "test-session"))
+        self.assertIs(first, second)
+
+    def test_invoke_reuses_thread_when_enabled_and_signature_matches(self):
+        rpc = FakeRpcClient()
+        model = TestableCodexChatModel("gpt-5.4", rpc, reuse_thread=True)
+        model.invoke("first prompt")
+        rpc.notifications = [
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "turn": {
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": [{"type": "agentMessage", "id": "msg-2", "text": "second"}],
+                    },
+                },
+            }
+        ]
+        model.invoke("second prompt")
+        self.assertEqual(rpc.thread_start_calls, 1)
+
+    def test_invoke_starts_new_thread_when_signature_changes(self):
+        rpc = FakeRpcClient()
+        model = TestableCodexChatModel("gpt-5.4", rpc, reuse_thread=True)
+        model.invoke(
+            [{"role": "system", "content": "system-a"}, {"role": "user", "content": "first prompt"}]
+        )
+        rpc.notifications = [
+            {
+                "method": "turn/completed",
+                "params": {
+                    "threadId": "thread-1",
+                    "turnId": "turn-1",
+                    "turn": {
+                        "id": "turn-1",
+                        "status": "completed",
+                        "items": [{"type": "agentMessage", "id": "msg-2", "text": "second"}],
+                    },
+                },
+            }
+        ]
+        model.invoke(
+            [{"role": "system", "content": "system-b"}, {"role": "user", "content": "second prompt"}]
+        )
+        self.assertEqual(rpc.thread_start_calls, 2)
 
     def test_codex_provider_validates_codex_models(self):
         client = CodexClient("gpt-5.3-codex")

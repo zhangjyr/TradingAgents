@@ -7,6 +7,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional
 
@@ -29,18 +30,37 @@ DEFAULT_CODEX_MODELS = [
 ]
 
 
-# #region debug-point A:debug-report
-def _debug_emit(hypothesis_id: str, location: str, msg: str, data: Optional[dict[str, Any]] = None) -> None:
-    env_path = Path(".dbg/codex-notification-timeout.env")
+@lru_cache(maxsize=8)
+def _resolve_debug_target(
+    env_filename: str,
+    default_session_id: str,
+) -> Optional[tuple[str, str]]:
+    env_path = Path(".dbg") / env_filename
+    if not env_path.exists():
+        return None
     debug_url = "http://127.0.0.1:7777/event"
-    session_id = "codex-notification-timeout"
+    session_id = default_session_id
+    for line in env_path.read_text().splitlines():
+        if line.startswith("DEBUG_SERVER_URL="):
+            debug_url = line.split("=", 1)[1].strip() or debug_url
+        elif line.startswith("DEBUG_SESSION_ID="):
+            session_id = line.split("=", 1)[1].strip() or session_id
+    return debug_url, session_id
+
+
+def _emit_debug_event(
+    env_filename: str,
+    default_session_id: str,
+    hypothesis_id: str,
+    location: str,
+    msg: str,
+    data: Optional[dict[str, Any]] = None,
+) -> None:
     try:
-        if env_path.exists():
-            for line in env_path.read_text().splitlines():
-                if line.startswith("DEBUG_SERVER_URL="):
-                    debug_url = line.split("=", 1)[1].strip() or debug_url
-                elif line.startswith("DEBUG_SESSION_ID="):
-                    session_id = line.split("=", 1)[1].strip() or session_id
+        target = _resolve_debug_target(env_filename, default_session_id)
+        if target is None:
+            return
+        debug_url, session_id = target
         payload = {
             "sessionId": session_id,
             "runId": "pre-fix",
@@ -58,38 +78,31 @@ def _debug_emit(hypothesis_id: str, location: str, msg: str, data: Optional[dict
         urllib.request.urlopen(request, timeout=1).read()
     except Exception:
         pass
+
+
+# #region debug-point A:debug-report
+def _debug_emit(hypothesis_id: str, location: str, msg: str, data: Optional[dict[str, Any]] = None) -> None:
+    _emit_debug_event(
+        "codex-notification-timeout.env",
+        "codex-notification-timeout",
+        hypothesis_id,
+        location,
+        msg,
+        data,
+    )
 # #endregion
 
 
 #region debug-point codex-model-loading
 def _model_loading_debug_emit(msg: str, data: Optional[dict[str, Any]] = None) -> None:
-    env_path = Path(".dbg/codex-model-loading.env")
-    debug_url = "http://127.0.0.1:7777/event"
-    session_id = "codex-model-loading"
-    try:
-        if env_path.exists():
-            for line in env_path.read_text().splitlines():
-                if line.startswith("DEBUG_SERVER_URL="):
-                    debug_url = line.split("=", 1)[1].strip() or debug_url
-                elif line.startswith("DEBUG_SESSION_ID="):
-                    session_id = line.split("=", 1)[1].strip() or session_id
-        payload = {
-            "sessionId": session_id,
-            "runId": "pre-fix",
-            "hypothesisId": "A",
-            "location": "codex_client.py",
-            "msg": f"[DEBUG] {msg}",
-            "data": data or {},
-            "ts": int(time.time() * 1000),
-        }
-        request = urllib.request.Request(
-            debug_url,
-            data=json.dumps(payload, default=str).encode(),
-            headers={"Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(request, timeout=1).read()
-    except Exception:
-        pass
+    _emit_debug_event(
+        "codex-model-loading.env",
+        "codex-model-loading",
+        "A",
+        "codex_client.py",
+        msg,
+        data,
+    )
 #endregion
 
 
@@ -586,6 +599,7 @@ class CodexChatModel:
         codex_command: str = DEFAULT_CODEX_COMMAND,
         codex_args: tuple[str, ...] = DEFAULT_CODEX_ARGS,
         callbacks: Optional[list[Any]] = None,
+        reuse_thread: bool = False,
     ):
         self.model = model
         self.cwd = cwd
@@ -593,9 +607,12 @@ class CodexChatModel:
         self.codex_command = codex_command
         self.codex_args = codex_args
         self.callbacks = list(callbacks or [])
+        self.reuse_thread = reuse_thread
         self._rpc: Optional[CodexAppServerRpcClient] = None
         self._invoke_lock = threading.Lock()
         self._assistant_deltas: dict[str, str] = {}
+        self._reusable_thread_id: Optional[str] = None
+        self._reusable_thread_signature: Optional[str] = None
         atexit.register(self.close)
 
     def bind_tools(self, tools: list[Any]) -> CodexToolsBinding:
@@ -636,23 +653,7 @@ class CodexChatModel:
             tool_map = {getattr(tool, "name", getattr(tool, "__name__", "tool")): tool for tool in (tools or [])}
             rpc.set_request_handler(lambda message: self._handle_server_request(message, tool_map))
             try:
-                self._emit_codex_event({"type": "status", "text": f"Starting Codex thread with model {self.model}"})
-                thread_result = rpc.request(
-                    "thread/start",
-                    {
-                        "model": self.model,
-                        "modelProvider": "openai",
-                        "cwd": self.cwd,
-                        "approvalPolicy": "never",
-                        "sandbox": "workspace-write",
-                        "developerInstructions": developer_instructions or None,
-                        "dynamicTools": self._dynamic_tools(tool_map),
-                        "experimentalRawEvents": True,
-                        "persistExtendedHistory": False,
-                    },
-                )
-                thread_id = self._extract_thread_id(thread_result)
-                self._emit_codex_event({"type": "status", "text": f"Codex thread ready: {thread_id}"})
+                thread_id = self._start_or_reuse_thread(rpc, developer_instructions, tool_map)
                 turn_result = rpc.request(
                     "turn/start",
                     {
@@ -673,13 +674,20 @@ class CodexChatModel:
                 if not content:
                     content = self._latest_assistant_text()
                 return AIMessage(content=content)
+            except Exception:
+                self._clear_reusable_thread()
+                raise
             finally:
                 rpc.clear_request_handler()
 
     def close(self) -> None:
+        self._clear_reusable_thread()
         if self._rpc is not None:
             self._rpc.close()
             self._rpc = None
+
+    def reset_thread(self) -> None:
+        self._clear_reusable_thread()
 
     def _get_rpc(self) -> CodexAppServerRpcClient:
         if self._rpc is None:
@@ -704,6 +712,66 @@ class CodexChatModel:
                 }
             )
         return specs
+
+    def _clear_reusable_thread(self) -> None:
+        self._reusable_thread_id = None
+        self._reusable_thread_signature = None
+
+    def _thread_signature(
+        self,
+        developer_instructions: str,
+        tool_map: dict[str, Any],
+    ) -> str:
+        return json.dumps(
+            {
+                "model": self.model,
+                "cwd": self.cwd,
+                "reasoning_effort": self.reasoning_effort,
+                "developer_instructions": developer_instructions or "",
+                "dynamic_tools": self._dynamic_tools(tool_map),
+            },
+            sort_keys=True,
+            default=str,
+        )
+
+    def _start_or_reuse_thread(
+        self,
+        rpc: CodexAppServerRpcClient,
+        developer_instructions: str,
+        tool_map: dict[str, Any],
+    ) -> str:
+        signature = self._thread_signature(developer_instructions, tool_map)
+        if (
+            self.reuse_thread
+            and self._reusable_thread_id is not None
+            and self._reusable_thread_signature == signature
+        ):
+            self._emit_codex_event({"type": "status", "text": f"Reusing Codex thread {self._reusable_thread_id}"})
+            return self._reusable_thread_id
+
+        self._emit_codex_event({"type": "status", "text": f"Starting Codex thread with model {self.model}"})
+        thread_result = rpc.request(
+            "thread/start",
+            {
+                "model": self.model,
+                "modelProvider": "openai",
+                "cwd": self.cwd,
+                "approvalPolicy": "never",
+                "sandbox": "workspace-write",
+                "developerInstructions": developer_instructions or None,
+                "dynamicTools": self._dynamic_tools(tool_map),
+                "experimentalRawEvents": True,
+                "persistExtendedHistory": False,
+            },
+        )
+        thread_id = self._extract_thread_id(thread_result)
+        self._emit_codex_event({"type": "status", "text": f"Codex thread ready: {thread_id}"})
+        if self.reuse_thread:
+            self._reusable_thread_id = thread_id
+            self._reusable_thread_signature = signature
+        else:
+            self._clear_reusable_thread()
+        return thread_id
 
     def _handle_server_request(self, message: dict[str, Any], tool_map: dict[str, Any]) -> dict[str, Any]:
         if message.get("method") != "item/tool/call":
@@ -938,6 +1006,7 @@ class CodexClient(BaseLLMClient):
             codex_command=self.kwargs.get("codex_command", DEFAULT_CODEX_COMMAND),
             codex_args=tuple(self.kwargs.get("codex_args", DEFAULT_CODEX_ARGS)),
             callbacks=self.kwargs.get("callbacks"),
+            reuse_thread=self.kwargs.get("reuse_thread", False),
         )
 
     def validate_model(self) -> bool:
